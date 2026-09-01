@@ -1,0 +1,11 @@
+build/
+out/
+testimages/
+testchart.png
+*.obj
+*.pdb
+*.ilk
+third_party/nvngx/lib/
+.venv/
+ui_out/
+__pycache__/

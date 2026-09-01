@@ -1,0 +1,259 @@
+# video2dlssnr
+
+![core: pure C++17](https://img.shields.io/badge/core-pure%20C%2B%2B17-00599C?logo=cplusplus&logoColor=white) ![GPU: Direct3D 12](https://img.shields.io/badge/GPU-Direct3D%2012-5C2D91) ![OS: Windows x64](https://img.shields.io/badge/OS-Windows%20x64-0078D6?logo=windows&logoColor=white) ![build: no CMake/vcpkg](https://img.shields.io/badge/build-no%20CMake%20%2F%20vcpkg-brightgreen)
+
+> **Disclaimer.** video2dlssnr is not affiliated, associated, authorized, endorsed by, or in any way
+> officially connected with NVIDIA Corporation or any of its subsidiaries or affiliates. All product
+> and company names are the registered trademarks of their original owners; their use here is for
+> identification only and does not imply endorsement. For research and educational use only, provided
+> as-is, without warranty of any kind.
+
+The core (`video2dlssnr.exe`) is **pure C++17 + Direct3D 12** — no CMake, no vcpkg, no engine — with
+a thin Python layer for the UI and video streaming.
+
+Run images or video through NVIDIA **DLSS Super Resolution** and **Neural Rendering**
+(DLSS 5, NGX feature 18) on D3D12, from the command line. Binary: `video2dlssnr.exe`; video
+entry point: `nr_video.py`.
+
+Video pipeline, all on the GPU:
+
+```
+ffmpeg decode → DLSS upscale → optical flow (motion vectors) → Neural Rendering → composite → ffmpeg NVENC
+```
+
+NR is temporal, so per-pixel **motion vectors** are estimated by optical flow — hardware
+**NVOFA** if present, else a compute-shader **Lucas–Kanade** fallback (`--nr-motion-engine`).
+A scene-cut check resets history on cuts; `--nr-motion-vis` dumps the flow field for debugging.
+
+## Requirements
+
+Barely anything: an NVIDIA RTX GPU on **driver 616.56+** and **Python 3**.
+
+## Quick start
+
+1. Download **`video2dlssnr_release.zip`** from the
+   [latest release](https://github.com/DaniilSokolyuk/video2dlssnr/releases/latest) and unzip it
+   anywhere.
+2. Double-click **`start.bat`**. First run creates a virtual environment and installs the Python
+   deps, then opens the app at <http://127.0.0.1:7860> with two tabs, **Image** and **Video**.
+
+(Building from source? See [Build](#build).)
+
+**Video** — DLSS Super Resolution + Neural Rendering over a whole clip: motion engine, upscale
+factor and every NR knob:
+
+![Video tab](screens/1.png)
+
+**Image** — the same on a still, with input/result side by side:
+
+![Image tab](screens/2.png)
+
+### Command line (optional)
+
+```bat
+:: build (Visual Studio 2022+ C++ x64 toolset, no CMake)
+build.bat
+
+:: Super Resolution — upscale an image, try a few presets
+out\video2dlssnr.exe --in photo.png --out out --quality quality --preset default,E,K
+
+:: Neural Rendering — add detail to an image (native resolution)
+out\video2dlssnr.exe --nr-run --in photo.png --out nr_out
+:: Neural Rendering + DLSS upscale — 2x, or pin one side and keep aspect
+out\video2dlssnr.exe --nr-run --in photo.png --out nr_out --nr-scale 2
+out\video2dlssnr.exe --nr-run --in photo.png --out nr_out --nr-width 3840
+
+:: a whole video (see the Video section for all options)
+python nr_video.py --in clip.mp4 --out clip_4k.mp4 --nr-width 3840 --nr-style 2
+```
+
+Each image run writes, into `--out`: `<name>_nr.png` (result), and with `--nr-orig` / `--nr-diff`
+also `<name>_orig.png` (input at the same size) and `<name>_nr_diff.png` (error map).
+
+Upscaling runs real **DLSS Super Resolution** first (input → target), then NR at the target
+size — the same order a game uses. `--nr-detail 0` returns the input untouched.
+
+## Video
+
+`nr_video.py` is the one entry point for video. It streams a whole clip through the
+same DLSS SR + Neural Rendering, keeps every frame on the GPU, and prints a live fps/ETA bar:
+
+```
+ffmpeg (decode) --raw rgba--> video2dlssnr --nr-video --raw rgba--> ffmpeg (NVENC + audio)
+```
+
+Between decode and encode nothing goes back to the CPU: DLSS upscales, an optical-flow pass
+(pyramidal Lucas–Kanade, on the GPU) estimates **motion vectors** from the previous frame, NR
+runs at the target size using them for temporal stability, and a compute shader composites and
+packs the 8-bit frame. Scene cuts reset the history so nothing is dragged across a cut.
+
+The flags are named exactly like `video2dlssnr.exe` (`--nr-*`), so the same knobs carry over.
+
+```bat
+:: 4K, Cinematic, motion vectors on (default), UI correction off (default)
+python nr_video.py --in clip.mp4 --out clip_4k.mp4 ^
+    --nr-width 3840 --nr-style 2 --nr-intensity 1.0
+
+:: 2x upscale instead of a fixed width
+python nr_video.py --in clip.mp4 --out clip_2x.mp4 --nr-scale 2
+
+:: native resolution, NR only (no upscale)
+python nr_video.py --in clip.mov --out clip_nr.mov
+:: debug: write the motion-vector visualisation instead of the NR result
+python nr_video.py --in clip.mp4 --out clip_flow.mp4 --nr-motion-vis
+```
+
+Progress prints live, e.g. `[=====>  ] 95/124 (77%)  25.9 fps  ETA 00:01`, then a final line
+with the steady-state GPU fps. `ffmpeg`/`ffprobe` must be on `PATH` (a winget **Gyan.FFmpeg**
+install is auto-detected). ProRes is CPU-decoded (NVDEC can't); everything else decodes fine.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--in <file>` | — | source clip |
+| `--out <file>` | — | output clip (container from the extension) |
+| `--nr-width <px>` | — | output width, height by aspect (DLSS upscales to it) |
+| `--nr-height <px>` | — | output height, width by aspect |
+| `--nr-scale <f>` | 1.0 | upscale factor when width/height unset (1.0 = native) |
+| `--nr-style <0-2>` | 0 | NR style: 0 Default, 1 Natural, 2 Cinematic |
+| `--nr-preset <0-3>` | 0 | NR render preset |
+| `--nr-intensity <f>` | 1.0 | NR intensity (0–2) |
+| `--nr-local-structure <f>` | 1.0 | local structure strength (0–2) |
+| `--nr-local-tone <f>` | 1.0 | local tone strength (0–2) |
+| `--nr-skin <f>` | -1.0 | skin structure strength (−1 = model default) |
+| `--nr-global-tone <f>` | -1.0 | global tone strength (<0 = model default) |
+| `--nr-detail <f>` | 1.0 | composite strength: 0 = original, 1 = full NR |
+| `--nr-color <f>` | 1.0 | 0 = keep original hue, 1 = NR colour |
+| `--nr-hdr` | off | feed linear light instead of the sRGB proxy |
+| `--nr-ui-correction <0\|1>` | 0 | NR UI correction (off — no game UI) |
+| `--nr-auto-mask` | off | NR automatic mask |
+| `--nr-motion <0\|1>` | 1 | optical-flow motion vectors for NR (temporal stability) |
+| `--nr-motion-vis` | off | output the flow visualisation instead of NR (debug) |
+| `--frames <n>` | all | cap the number of frames processed |
+| `--codec <name>` | `hevc_nvenc` | `hevc_nvenc` / `h264_nvenc` / `av1_nvenc` |
+| `--enc-preset <p>` | `p5` | NVENC preset, `p1` (fast) .. `p7` (quality) |
+
+## Arguments
+
+### Common
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--in <path>` | — | source image, or a folder (Neural Rendering) |
+| `--out <dir>` | `out` / `nr_out` | output directory |
+| `--adapter <i>` | fastest | DXGI adapter index |
+| `--json <file>` | `<out>/results.json` | machine-readable results (SR) |
+| `--verbose`, `-v` | off | print the full NGX log |
+| `--debug-layer` | off | enable the D3D12 debug layer |
+| `--help` | | full option list |
+
+### Neural Rendering
+
+`--nr-run` selects it. Model parameters are latched when the feature is created:
+
+| Flag | Range | Default | Meaning |
+|---|---|---|---|
+| `--nr-preset <n>` | 0–3 | 0 | render preset: 0 Default, 1/2/3 Preset 1..3 |
+| `--nr-style <n>` | 0–2 | 0 | **0 Default**, **1 Natural** (gentler, keeps skin tone), **2 Cinematic** (less shine) |
+| `--nr-intensity <f>` | 0.0–2.0 | 1.0 | overall detail strength fed to the model |
+| `--nr-local-structure <f>` | 0.0–2.0 | 1.0 | local structure strength |
+| `--nr-local-tone <f>` | 0.0–2.0 | 1.0 | local tone strength |
+| `--nr-skin <f>` | -1.0–2.0 | model default | skin structure strength (-1 or below = leave at the model's default) |
+| `--nr-global-tone <f>` | 0.0–2.0 | model default | global tone strength (below 0 = leave at default) |
+| `--nr-auto-mask` | on/off | off | the model's automatic mask |
+| `--nr-ui-correction <0\|1>` | 0 or 1 | 1 | UI correction |
+
+Upscaling (DLSS SR does the enlarge, NR the detail):
+
+| Flag | Range | Default | Meaning |
+|---|---|---|---|
+| `--nr-scale <f>` | ~1.0–3.0 | 1.0 | output = input × f (DLSS SR upscales up to ~3×) |
+| `--nr-width <px>` | ≥ input | — | set output width, height by aspect |
+| `--nr-height <px>` | ≥ input | — | set output height, width by aspect |
+
+Composition — how much of the model's output to keep (blended over the original on the CPU):
+
+| Flag | Range | Default | Meaning |
+|---|---|---|---|
+| `--nr-detail <f>` | 0.0–2.0 | 1.0 | overall strength: **0 = the original**, 1 = full NR, >1 exaggerates |
+| `--nr-color <f>` | 0.0–1.0 | 1.0 | 0 = keep the original hue (NR luma only), 1 = adopt the model's colour |
+| `--nr-hdr` | on/off | off | feed linear light instead of the default sRGB-encoded proxy |
+
+### Super Resolution
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--quality <list>` | `quality` | `dlaa,ultraquality,quality,balanced,performance,ultraperformance` or `all` |
+| `--preset <list>` | `default,J,K` | `A`..`O`, `default`, or `all` |
+| `--frames <n>` | 32 | accumulation passes per run |
+| `--phases <n>` | auto | jitter sequence length |
+| `--filter <mode>` | point | downsample filter: `point`, `bilinear`, `tent`, `lanczos` |
+| `--filter-space <s>` | linear | `linear` or `display` |
+| `--jitter-sign <s>` | auto | `auto`, `++`, `+-`, `-+`, `--` |
+| `--hdr` | off | feed linear colour and set the DLSS HDR flag |
+| `--no-auto-exposure` | off | supply a constant exposure texture (only affects `--hdr`) |
+| `--alpha` | off | enable DLSS alpha upscaling |
+| `--depth <v>` | 0.5 | constant depth written to the depth input |
+| `--png16` | off | write 16-bit PNGs |
+| `--save-lr` | off | also write the low-res input frame |
+| `--no-diff` | off | skip the diff error map |
+| `--diff-gain <f>` | 8 | error-map amplification |
+| `--metrics-only` | off | measure without writing images (batch sweeps) |
+
+### Diagnostics
+
+| Flag | Meaning |
+|---|---|
+| `--probe-nr` | try to create the NR feature and report where it stops; needs no image |
+| `--probe-sl` | drive Streamline and report whether it sees DLSS-NR as supported |
+| `--nr-in <WxH>` / `--nr-out <WxH>` | probe input / output size |
+| `--sl-feature <id>` | Streamline feature id to probe (default 1004 = DLSS-NR) |
+
+## Build
+
+Needs Visual Studio 2022+ with the **C++ x64 toolset**. No CMake, no vcpkg.
+
+The NGX headers and `stb` are vendored, but the proprietary **NGX import library is not** (it is
+gitignored). Supply it before building — it is required at link time (the tool resolves the
+`NVSDK_NGX_D3D12_*` symbols from it; at runtime everything goes through the driver's `_nvngx.dll`):
+
+1. Get the **DLSS SDK** from <https://github.com/NVIDIA/DLSS> (`lib/Windows_x86_64/x86_64/`).
+2. Copy into `third_party/nvngx/lib/`:
+   - `nvsdk_ngx_d.lib` — needed for the **release** build,
+   - `nvsdk_ngx_d_dbg.lib` — only for the **debug** build.
+
+Then run from a normal terminal (build.bat finds the MSVC toolchain via vswhere):
+
+```bat
+build.bat            :: release
+build.bat debug      :: debug
+```
+
+Produces `out\video2dlssnr.exe`, the forwarder `out\nvngx.dll_dlssnr.dll`, and the test binary
+`out\video2dlssnr_tests.exe`. (build.bat errors out with `missing ...nvsdk_ngx_d.lib` if step 2 was
+skipped.)
+
+### Runtime libraries
+
+The `.lib` above is only for linking. To actually **run** the built `video2dlssnr.exe`, drop these
+into `out\` next to it (the release ships them; a source build does not):
+
+- **`nvngx_dlssnr.dll`** (~159 MB) — DLSS Neural Rendering (feature 18).
+- **`nvngx_dlss.dll`** (~57 MB) — DLSS Super Resolution (the upscaler).
+- **`ffmpeg.exe`** + **`ffprobe.exe`** — video only. `nr_video.py` looks in `out\` first, then `PATH`.
+
+Both NVIDIA DLLs are proprietary and loaded locally, not from the driver store. Without
+`nvngx_dlss.dll` the upscale fails with `UnableToInitializeFeature (0xBAD0000B)`: video errors out
+and image mode silently falls back to a plain bilinear resize. Use builds that run on your GPU —
+extract them from your driver package or a DLSS-enabled game. For ffmpeg, a small static build with
+NVENC (e.g. gyan.dev *essentials*) is enough.
+
+## Layout
+
+```
+app.py         Gradio UI (Image / Video tabs); start.bat launches it in a venv
+nr_video.py    video entry point (ffmpeg <-> video2dlssnr streaming)
+src/           image I/O + metrics, D3D12 context, NGX wrapper, DLSS SR, DLSS-NR, CLI, main
+forwarder/     the nvngx.dll_dlssnr.dll caller-gate shim
+third_party/   NGX + Optical Flow SDK headers, stb single-header libs
+build.bat      MSVC build of the tool, the forwarder and the tests
+```
