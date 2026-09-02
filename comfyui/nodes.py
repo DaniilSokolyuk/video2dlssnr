@@ -262,8 +262,11 @@ class DLSSNRVideo:
                                                "rate are carried over to the video output."}),
                 "images": ("IMAGE", {"tooltip": "Frame batch (e.g. VideoHelperSuite Load Video). "
                                                 "Used when no video is connected."}),
-                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
-                                  "tooltip": "Frame rate of the video output when only images are given."}),
+                "images_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
+                                         "tooltip": "Only with an IMAGE input: frame-rate metadata for "
+                                                    "the VIDEO output (the batch carries none). Does NOT "
+                                                    "add frames — the frame count stays the same. Ignored "
+                                                    "when a VIDEO is connected."}),
             },
         }
 
@@ -277,15 +280,15 @@ class DLSSNRVideo:
 
     def run(self, style, preset, intensity, local_structure, local_tone, skin, global_tone,
             detail, color, ui_correction, auto_mask, hdr, scale, width, adapter, motion,
-            motion_engine, motion_vis, video=None, images=None, fps=24.0):
+            motion_engine, motion_vis, video=None, images=None, images_fps=24.0):
         audio, frame_rate = None, None
         if video is not None:
             comps = video.get_components()
             images, audio, frame_rate = comps.images, comps.audio, comps.frame_rate
         if images is None:
             raise RuntimeError("Connect a VIDEO (Load Video) or an IMAGE batch (e.g. VHS Load Video).")
-        if frame_rate is None:
-            frame_rate = Fraction(fps).limit_denominator(1000)
+        if frame_rate is None:  # an IMAGE batch carries no rate; this only labels the VIDEO output
+            frame_rate = Fraction(images_fps).limit_denominator(1000)
 
         exe = find_exe()
         nr = nr_args(style, preset, intensity, local_structure, local_tone, skin, global_tone,

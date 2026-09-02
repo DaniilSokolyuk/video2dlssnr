@@ -57,17 +57,16 @@ line with fps; results land in `ui_out\`.
 > Releases.
 
 1. Open [Releases](https://github.com/DaniilSokolyuk/video2dlssnr/releases) and download
-   **`video2dlssnr-comfyui-vX.Y.zip`**.
+   **`video2dlssnr-comfyui.zip`**.
 2. Extract the contained `video2dlssnr` folder to:
 
    ```text
    ComfyUI\custom_nodes\video2dlssnr
    ```
 
-3. Supply the NVIDIA runtime into `custom_nodes\video2dlssnr\bin\` (next to `video2dlssnr.exe`) —
-   see `bin\PUT_nvngx_dlssnr.dll_HERE.txt`. Alternatively set the environment variable
-   `VIDEO2DLSSNR_EXE` to the full path of an existing `video2dlssnr.exe`.
-4. Restart ComfyUI. The nodes are under **video2dlssnr**:
+3. Restart ComfyUI. The nodes find `video2dlssnr.exe` in `custom_nodes\video2dlssnr\bin\` on
+   their own; to point them at another copy, set the environment variable `VIDEO2DLSSNR_EXE` to
+   its full path. The nodes are under **video2dlssnr**:
 
 | Node | In → Out | What it does |
 |---|---|---|
@@ -85,7 +84,10 @@ Both processing nodes expose the same knobs as the CLI — `style`, `preset`, `i
 `local_structure`, `local_tone`, `skin`, `global_tone`, `detail`, `color`, `ui_correction`,
 `auto_mask`, `hdr`, `scale` / `width` (width pins the aspect, `0` = use scale) — plus `adapter`
 (which GPU); the Video node adds `motion`, `motion_engine` (`auto` / `nvof` / `lk`), `motion_vis`
-and `fps` (only used for the `VIDEO` output when the input is an `IMAGE` batch).
+and `images_fps` — frame-rate metadata for the `VIDEO` output when the input is an `IMAGE` batch
+(it does not add frames; with a `VIDEO` input the source rate is used). The frame count in equals
+the frame count out — to raise the frame rate, chain a frame-interpolation node (e.g. GIMM-VFI,
+RIFE) after it.
 
 Frames travel to the tool as raw RGBA over a pipe and come back the same way — no ffmpeg, no temp
 files — and a driver hiccup takes down the helper process, not ComfyUI. Nodes need nothing beyond
