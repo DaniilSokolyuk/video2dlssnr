@@ -8,29 +8,22 @@
 > identification only and does not imply endorsement. For research and educational use only, provided
 > as-is, without warranty of any kind.
 
-The core (`video2dlssnr.exe`) is **pure C++17 + Direct3D 12** — no CMake, no vcpkg, no engine — with
-a thin Python layer for the UI, the video streaming and the ComfyUI nodes.
-
-Run images or video through NVIDIA **DLSS Super Resolution** and **Neural Rendering**
-(DLSS 5, NGX feature 18) on D3D12. Three ways to use it: a **UI**, **ComfyUI** nodes, or the
+NVIDIA **DLSS Super Resolution** + **Neural Rendering** (DLSS 5, NGX feature 18) for images and
+video on Windows / Direct3D 12. Use it through a **UI**, as **ComfyUI** nodes, or from the
 **command line**.
 
-Video pipeline, all on the GPU:
-
-```
-ffmpeg decode → DLSS upscale → optical flow (motion vectors) → Neural Rendering → composite → ffmpeg NVENC
-```
-
-NR is temporal, so per-pixel **motion vectors** are estimated by optical flow — hardware
-**NVOFA** if present, else a compute-shader **Lucas–Kanade** fallback (`--nr-motion-engine`).
-A scene-cut check resets history on cuts; `--nr-motion-vis` dumps the flow field for debugging.
+The core is `video2dlssnr.exe` — **pure C++17 + D3D12**, no CMake, no vcpkg, no engine — a single
+self-contained CLI (files in/out, or raw frames over stdin/stdout) that **embeds anywhere**. The UI,
+the video script and the ComfyUI nodes are thin Python wrappers around it.
 
 ## Contents
 
 - [Requirements](#requirements)
 - [UI](#ui) — download, double-click, done
 - [ComfyUI](#comfyui) — the same as custom nodes
-- [Command line](#command-line) — `video2dlssnr.exe` and `nr_video.py`, every flag
+- [Command line](#command-line) — a plain CLI that embeds anywhere: `video2dlssnr.exe` takes files
+  in / files out or raw frames over stdin/stdout, `nr_video.py` wraps it for clips
+- [How it works](#how-it-works) — the GPU pipeline, motion vectors, scene cuts
 - [Build](#build)
 - [Layout](#layout)
 
@@ -79,24 +72,31 @@ line with fps; results land in `ui_out\`.
 | Node | In → Out | What it does |
 |---|---|---|
 | **DLSS Neural Rendering (Image)** | `IMAGE → IMAGE` | each image in the batch on its own (the Image tab) |
-| **DLSS Neural Rendering (Video)** | `IMAGE → IMAGE` | the batch is a clip: frames stream through the tool with optical-flow **motion vectors** for temporal stability (the Video tab) |
+| **DLSS Neural Rendering (Video)** | `VIDEO` or `IMAGE → IMAGE + VIDEO` | a clip: frames stream through the tool with optical-flow **motion vectors** for temporal stability (the Video tab). Takes the core **Load Video** output directly (audio and frame rate are carried over) or an `IMAGE` batch from VideoHelperSuite, and returns both the frames and a ready `VIDEO` |
 | **DLSS NR Runtime Check** | `→ STRING` | runs a tiny test job and reports whether Neural Rendering works here, plus the optical-flow backend in use — try it first if something is off |
 
 Typical graphs:
 
 - still: **Load Image → DLSS Neural Rendering (Image) → Save Image**
-- clip (with VideoHelperSuite): **Load Video → DLSS Neural Rendering (Video) → Video Combine**
+- clip, core nodes: **Load Video → DLSS Neural Rendering (Video) → Save Video**
+- clip, VideoHelperSuite: **Load Video (Upload) → DLSS Neural Rendering (Video) → Video Combine**
 
 Both processing nodes expose the same knobs as the CLI — `style`, `preset`, `intensity`,
 `local_structure`, `local_tone`, `skin`, `global_tone`, `detail`, `color`, `ui_correction`,
 `auto_mask`, `hdr`, `scale` / `width` (width pins the aspect, `0` = use scale) — plus `adapter`
-(which GPU); the Video node adds `motion`, `motion_engine` (`auto` / `nvof` / `lk`) and `motion_vis`.
+(which GPU); the Video node adds `motion`, `motion_engine` (`auto` / `nvof` / `lk`), `motion_vis`
+and `fps` (only used for the `VIDEO` output when the input is an `IMAGE` batch).
 
 Frames travel to the tool as raw RGBA over a pipe and come back the same way — no ffmpeg, no temp
 files — and a driver hiccup takes down the helper process, not ComfyUI. Nodes need nothing beyond
 what ComfyUI already ships (torch, numpy, Pillow).
 
 ## Command line
+
+`video2dlssnr.exe` is a self-contained command-line tool with no runtime dependencies beyond the
+NVIDIA driver: images go in and out as files, video as raw RGBA frames over stdin/stdout
+(`--nr-video`), progress on stderr. That makes it trivial to embed in any pipeline, script or app —
+`nr_video.py` and the ComfyUI nodes are just two thin wrappers around it.
 
 ### Images — `video2dlssnr.exe`
 
@@ -126,11 +126,7 @@ same DLSS SR + Neural Rendering, keeps every frame on the GPU, and prints a live
 ffmpeg (decode) --raw rgba--> video2dlssnr --nr-video --raw rgba--> ffmpeg (NVENC + audio)
 ```
 
-Between decode and encode nothing goes back to the CPU: DLSS upscales, an optical-flow pass
-estimates **motion vectors** from the previous frame, NR runs at the target size using them for
-temporal stability, and a compute shader composites and packs the 8-bit frame. Scene cuts reset the
-history so nothing is dragged across a cut.
-
+Nothing goes back to the CPU between decode and encode — see [How it works](#how-it-works).
 The flags are named exactly like `video2dlssnr.exe` (`--nr-*`), so the same knobs carry over.
 
 ```bat
@@ -252,6 +248,21 @@ Composition — how much of the model's output to keep (blended over the origina
 | `--probe-sl` | drive Streamline and report whether it sees DLSS-NR as supported |
 | `--nr-in <WxH>` / `--nr-out <WxH>` | probe input / output size |
 | `--sl-feature <id>` | Streamline feature id to probe (default 1004 = DLSS-NR) |
+
+## How it works
+
+Everything runs on the GPU:
+
+```
+ffmpeg decode → DLSS upscale → optical flow (motion vectors) → Neural Rendering → composite → ffmpeg NVENC
+```
+
+DLSS SR upscales first (input → target), then Neural Rendering adds detail at the target size — the
+same order a game uses. NR is temporal, so per-pixel **motion vectors** are estimated by optical
+flow: hardware **NVOFA** if present, else a compute-shader **Lucas–Kanade** fallback
+(`--nr-motion-engine`). A scene-cut check resets history on cuts; `--nr-motion-vis` dumps the flow
+field for debugging. Between decode and encode nothing goes back to the CPU — a compute shader
+composites the result over the original and packs the 8-bit frame.
 
 ## Build
 

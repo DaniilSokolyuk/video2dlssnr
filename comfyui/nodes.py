@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from fractions import Fraction
 
 import numpy as np
 import torch
@@ -176,6 +177,19 @@ def to_tensor(u8):
     return torch.from_numpy(np.ascontiguousarray(u8).astype(np.float32) / 255.0)
 
 
+def make_video(images, audio, frame_rate):
+    """Wrap frames into ComfyUI's VIDEO type the way the core Create Video node does.
+
+    Returns None on ComfyUI builds that predate the VIDEO type, so the IMAGE output still works.
+    """
+    try:
+        from comfy_api.input_impl import VideoFromComponents
+        from comfy_api.util import VideoComponents
+    except Exception:
+        return None
+    return VideoFromComponents(VideoComponents(images=images, audio=audio, frame_rate=frame_rate))
+
+
 def _nr_inputs():
     f = lambda d, lo, hi: ("FLOAT", {"default": d, "min": lo, "max": hi, "step": 0.05})
     return {
@@ -226,31 +240,53 @@ class DLSSNRImage:
 
 
 class DLSSNRVideo:
-    """The batch is a clip: streamed through --nr-video with motion vectors for temporal NR."""
+    """A clip streamed through --nr-video with motion vectors for temporal NR.
+
+    Takes either the core Load Video output (VIDEO — audio and frame rate carried over) or a plain
+    IMAGE batch (e.g. VideoHelperSuite), and returns both the frames and a ready VIDEO.
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "images": ("IMAGE",),
-            **_nr_inputs(),
-            "motion": ("BOOLEAN", {"default": True,
-                                   "tooltip": "Optical-flow motion vectors for temporal stability."}),
-            "motion_engine": (ENGINES, {"default": "auto"}),
-            "motion_vis": ("BOOLEAN", {"default": False,
-                                       "tooltip": "Debug: output the flow field instead of NR."}),
-        }}
+        return {
+            "required": {
+                **_nr_inputs(),
+                "motion": ("BOOLEAN", {"default": True,
+                                       "tooltip": "Optical-flow motion vectors for temporal stability."}),
+                "motion_engine": (ENGINES, {"default": "auto"}),
+                "motion_vis": ("BOOLEAN", {"default": False,
+                                           "tooltip": "Debug: output the flow field instead of NR."}),
+            },
+            "optional": {
+                "video": ("VIDEO", {"tooltip": "From the core Load Video node. Its audio and frame "
+                                               "rate are carried over to the video output."}),
+                "images": ("IMAGE", {"tooltip": "Frame batch (e.g. VideoHelperSuite Load Video). "
+                                                "Used when no video is connected."}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
+                                  "tooltip": "Frame rate of the video output when only images are given."}),
+            },
+        }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("images",)
+    RETURN_TYPES = ("IMAGE", "VIDEO")
+    RETURN_NAMES = ("images", "video")
     FUNCTION = "run"
     CATEGORY = "video2dlssnr"
-    DESCRIPTION = ("Treats the batch as a clip: frames stream through DLSS SR + Neural Rendering "
-                   "with optical-flow motion vectors for temporal stability (same as the Video tab). "
-                   "Pair with VideoHelperSuite Load Video / Video Combine.")
+    DESCRIPTION = ("A clip through DLSS SR + Neural Rendering with optical-flow motion vectors for "
+                   "temporal stability (same as the Video tab). Connect the core Load Video (VIDEO) "
+                   "or an IMAGE batch; get frames and a ready VIDEO (audio and fps kept) back.")
 
-    def run(self, images, style, preset, intensity, local_structure, local_tone, skin, global_tone,
+    def run(self, style, preset, intensity, local_structure, local_tone, skin, global_tone,
             detail, color, ui_correction, auto_mask, hdr, scale, width, adapter, motion,
-            motion_engine, motion_vis):
+            motion_engine, motion_vis, video=None, images=None, fps=24.0):
+        audio, frame_rate = None, None
+        if video is not None:
+            comps = video.get_components()
+            images, audio, frame_rate = comps.images, comps.audio, comps.frame_rate
+        if images is None:
+            raise RuntimeError("Connect a VIDEO (Load Video) or an IMAGE batch (e.g. VHS Load Video).")
+        if frame_rate is None:
+            frame_rate = Fraction(fps).limit_denominator(1000)
+
         exe = find_exe()
         nr = nr_args(style, preset, intensity, local_structure, local_tone, skin, global_tone,
                      detail, color, ui_correction, auto_mask, hdr)
@@ -269,7 +305,8 @@ class DLSSNRVideo:
 
         out = run_video_np(src, width, scale, nr, motion, motion_engine, motion_vis, exe, adapter,
                            progress)
-        return (to_tensor(out),)
+        out_t = to_tensor(out)
+        return (out_t, make_video(out_t, audio, frame_rate))
 
 
 class DLSSNRRuntimeInfo:
