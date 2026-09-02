@@ -9,11 +9,11 @@
 > as-is, without warranty of any kind.
 
 The core (`video2dlssnr.exe`) is **pure C++17 + Direct3D 12** — no CMake, no vcpkg, no engine — with
-a thin Python layer for the UI and video streaming.
+a thin Python layer for the UI, the video streaming and the ComfyUI nodes.
 
 Run images or video through NVIDIA **DLSS Super Resolution** and **Neural Rendering**
-(DLSS 5, NGX feature 18) on D3D12, from the command line. Binary: `video2dlssnr.exe`; video
-entry point: `nr_video.py`.
+(DLSS 5, NGX feature 18) on D3D12. Three ways to use it: a **UI**, **ComfyUI** nodes, or the
+**command line**.
 
 Video pipeline, all on the GPU:
 
@@ -25,19 +25,14 @@ NR is temporal, so per-pixel **motion vectors** are estimated by optical flow �
 **NVOFA** if present, else a compute-shader **Lucas–Kanade** fallback (`--nr-motion-engine`).
 A scene-cut check resets history on cuts; `--nr-motion-vis` dumps the flow field for debugging.
 
-## Requirements
+## Contents
 
-Barely anything: an NVIDIA RTX GPU on **driver 616.56+** and **Python 3**.
-
-## Quick start
-
-1. Download **`video2dlssnr_release.zip`** from the
-   [latest release](https://github.com/DaniilSokolyuk/video2dlssnr/releases/latest) and unzip it
-   anywhere.
-2. Double-click **`start.bat`**. First run creates a virtual environment and installs the Python
-   deps, then opens the app at <http://127.0.0.1:7860> with two tabs, **Image** and **Video**.
-
-(Building from source? See [Build](#build).)
+- [Requirements](#requirements)
+- [UI](#ui) — download, double-click, done
+- [ComfyUI](#comfyui) — the same as custom nodes
+- [Command line](#command-line) — `video2dlssnr.exe` and `nr_video.py`, every flag
+- [Build](#build)
+- [Layout](#layout)
 
 **Video** — DLSS Super Resolution + Neural Rendering over a whole clip: motion engine, upscale
 factor and every NR knob:
@@ -48,23 +43,72 @@ factor and every NR knob:
 
 ![Image tab](screens/2.png)
 
-### Command line (optional)
+## Requirements
+
+Barely anything: an NVIDIA RTX GPU on **driver 616.56+** and **Python 3**.
+
+## UI
+
+1. Download **`video2dlssnr_release.zip`** from the
+   [latest release](https://github.com/DaniilSokolyuk/video2dlssnr/releases/latest) and unzip it
+   anywhere.
+2. Double-click **`start.bat`**. First run creates a virtual environment and installs the Python
+   deps, then opens the app at <http://127.0.0.1:7860> with two tabs, **Image** and **Video**.
+
+Drop a file, pick the style / intensity / output size, press **Run**. Video shows a live progress
+line with fps; results land in `ui_out\`.
+
+## ComfyUI
+
+> Do not download GitHub's automatically generated *Source code.zip* — take the ComfyUI asset from
+> Releases.
+
+1. Open [Releases](https://github.com/DaniilSokolyuk/video2dlssnr/releases) and download
+   **`video2dlssnr-comfyui-vX.Y.zip`**.
+2. Extract the contained `video2dlssnr` folder to:
+
+   ```text
+   ComfyUI\custom_nodes\video2dlssnr
+   ```
+
+3. Supply the NVIDIA runtime into `custom_nodes\video2dlssnr\bin\` (next to `video2dlssnr.exe`) —
+   see `bin\PUT_nvngx_dlssnr.dll_HERE.txt`. Alternatively set the environment variable
+   `VIDEO2DLSSNR_EXE` to the full path of an existing `video2dlssnr.exe`.
+4. Restart ComfyUI. The nodes are under **video2dlssnr**:
+
+| Node | In → Out | What it does |
+|---|---|---|
+| **DLSS Neural Rendering (Image)** | `IMAGE → IMAGE` | each image in the batch on its own (the Image tab) |
+| **DLSS Neural Rendering (Video)** | `IMAGE → IMAGE` | the batch is a clip: frames stream through the tool with optical-flow **motion vectors** for temporal stability (the Video tab) |
+| **DLSS NR Runtime Check** | `→ STRING` | runs a tiny test job and reports whether Neural Rendering works here, plus the optical-flow backend in use — try it first if something is off |
+
+Typical graphs:
+
+- still: **Load Image → DLSS Neural Rendering (Image) → Save Image**
+- clip (with VideoHelperSuite): **Load Video → DLSS Neural Rendering (Video) → Video Combine**
+
+Both processing nodes expose the same knobs as the CLI — `style`, `preset`, `intensity`,
+`local_structure`, `local_tone`, `skin`, `global_tone`, `detail`, `color`, `ui_correction`,
+`auto_mask`, `hdr`, `scale` / `width` (width pins the aspect, `0` = use scale) — plus `adapter`
+(which GPU); the Video node adds `motion`, `motion_engine` (`auto` / `nvof` / `lk`) and `motion_vis`.
+
+Frames travel to the tool as raw RGBA over a pipe and come back the same way — no ffmpeg, no temp
+files — and a driver hiccup takes down the helper process, not ComfyUI. Nodes need nothing beyond
+what ComfyUI already ships (torch, numpy, Pillow).
+
+## Command line
+
+### Images — `video2dlssnr.exe`
 
 ```bat
-:: build (Visual Studio 2022+ C++ x64 toolset, no CMake)
-build.bat
-
-:: Super Resolution — upscale an image, try a few presets
-out\video2dlssnr.exe --in photo.png --out out --quality quality --preset default,E,K
-
 :: Neural Rendering — add detail to an image (native resolution)
 out\video2dlssnr.exe --nr-run --in photo.png --out nr_out
 :: Neural Rendering + DLSS upscale — 2x, or pin one side and keep aspect
 out\video2dlssnr.exe --nr-run --in photo.png --out nr_out --nr-scale 2
 out\video2dlssnr.exe --nr-run --in photo.png --out nr_out --nr-width 3840
 
-:: a whole video (see the Video section for all options)
-python nr_video.py --in clip.mp4 --out clip_4k.mp4 --nr-width 3840 --nr-style 2
+:: Super Resolution only — upscale an image, try a few presets
+out\video2dlssnr.exe --in photo.png --out out --quality quality --preset default,E,K
 ```
 
 Each image run writes, into `--out`: `<name>_nr.png` (result), and with `--nr-orig` / `--nr-diff`
@@ -73,7 +117,7 @@ also `<name>_orig.png` (input at the same size) and `<name>_nr_diff.png` (error 
 Upscaling runs real **DLSS Super Resolution** first (input → target), then NR at the target
 size — the same order a game uses. `--nr-detail 0` returns the input untouched.
 
-## Video
+### Video — `nr_video.py`
 
 `nr_video.py` is the one entry point for video. It streams a whole clip through the
 same DLSS SR + Neural Rendering, keeps every frame on the GPU, and prints a live fps/ETA bar:
@@ -83,9 +127,9 @@ ffmpeg (decode) --raw rgba--> video2dlssnr --nr-video --raw rgba--> ffmpeg (NVEN
 ```
 
 Between decode and encode nothing goes back to the CPU: DLSS upscales, an optical-flow pass
-(pyramidal Lucas–Kanade, on the GPU) estimates **motion vectors** from the previous frame, NR
-runs at the target size using them for temporal stability, and a compute shader composites and
-packs the 8-bit frame. Scene cuts reset the history so nothing is dragged across a cut.
+estimates **motion vectors** from the previous frame, NR runs at the target size using them for
+temporal stability, and a compute shader composites and packs the 8-bit frame. Scene cuts reset the
+history so nothing is dragged across a cut.
 
 The flags are named exactly like `video2dlssnr.exe` (`--nr-*`), so the same knobs carry over.
 
@@ -104,8 +148,8 @@ python nr_video.py --in clip.mp4 --out clip_flow.mp4 --nr-motion-vis
 ```
 
 Progress prints live, e.g. `[=====>  ] 95/124 (77%)  25.9 fps  ETA 00:01`, then a final line
-with the steady-state GPU fps. `ffmpeg`/`ffprobe` must be on `PATH` (a winget **Gyan.FFmpeg**
-install is auto-detected). ProRes is CPU-decoded (NVDEC can't); everything else decodes fine.
+with the steady-state GPU fps. `ffmpeg` / `ffprobe` are looked up in `out\`, then on `PATH`, then a
+winget **Gyan.FFmpeg** install. ProRes is CPU-decoded (NVDEC can't); everything else decodes fine.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -127,14 +171,15 @@ install is auto-detected). ProRes is CPU-decoded (NVDEC can't); everything else 
 | `--nr-ui-correction <0\|1>` | 0 | NR UI correction (off — no game UI) |
 | `--nr-auto-mask` | off | NR automatic mask |
 | `--nr-motion <0\|1>` | 1 | optical-flow motion vectors for NR (temporal stability) |
+| `--nr-motion-engine <e>` | `auto` | flow backend: `auto` (NVOFA else LK), `nvof`, `lk` |
 | `--nr-motion-vis` | off | output the flow visualisation instead of NR (debug) |
 | `--frames <n>` | all | cap the number of frames processed |
 | `--codec <name>` | `hevc_nvenc` | `hevc_nvenc` / `h264_nvenc` / `av1_nvenc` |
 | `--enc-preset <p>` | `p5` | NVENC preset, `p1` (fast) .. `p7` (quality) |
 
-## Arguments
+### All arguments
 
-### Common
+#### Common
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -146,7 +191,7 @@ install is auto-detected). ProRes is CPU-decoded (NVDEC can't); everything else 
 | `--debug-layer` | off | enable the D3D12 debug layer |
 | `--help` | | full option list |
 
-### Neural Rendering
+#### Neural Rendering
 
 `--nr-run` selects it. Model parameters are latched when the feature is created:
 
@@ -178,7 +223,7 @@ Composition — how much of the model's output to keep (blended over the origina
 | `--nr-color <f>` | 0.0–1.0 | 1.0 | 0 = keep the original hue (NR luma only), 1 = adopt the model's colour |
 | `--nr-hdr` | on/off | off | feed linear light instead of the default sRGB-encoded proxy |
 
-### Super Resolution
+#### Super Resolution
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -199,7 +244,7 @@ Composition — how much of the model's output to keep (blended over the origina
 | `--diff-gain <f>` | 8 | error-map amplification |
 | `--metrics-only` | off | measure without writing images (batch sweeps) |
 
-### Diagnostics
+#### Diagnostics
 
 | Flag | Meaning |
 |---|---|
@@ -251,6 +296,7 @@ back to a plain bilinear resize. For ffmpeg, any small static build with NVENC w
 ```
 app.py         Gradio UI (Image / Video tabs); start.bat launches it in a venv
 nr_video.py    video entry point (ffmpeg <-> video2dlssnr streaming)
+comfyui/       ComfyUI custom nodes (DLSS NR Image / Video / Runtime Check)
 src/           image I/O + metrics, D3D12 context, NGX wrapper, DLSS SR, DLSS-NR, CLI, main
 forwarder/     the nvngx.dll_dlssnr.dll caller-gate shim
 third_party/   NGX + Optical Flow SDK headers, stb single-header libs
