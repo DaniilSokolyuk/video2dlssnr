@@ -5,8 +5,8 @@
 > **Disclaimer.** video2dlssnr is not affiliated, associated, authorized, endorsed by, or in any way
 > officially connected with NVIDIA Corporation or any of its subsidiaries or affiliates. All product
 > and company names are the registered trademarks of their original owners; their use here is for
-> identification only and does not imply endorsement. For research and educational use only, provided
-> as-is, without warranty of any kind.
+> identification only and does not imply endorsement. Provided as-is, without warranty of any kind.
+> Licensed under the [MIT License](LICENSE); NVIDIA components are subject to NVIDIA's own terms.
 
 NVIDIA **DLSS Super Resolution** + **Neural Rendering** (DLSS 5, NGX feature 18) for images and
 video on Windows / Direct3D 12. Use it through a **UI**, as **ComfyUI** nodes, or from the
@@ -361,3 +361,13 @@ forwarder/     the nvngx.dll_dlssnr.dll caller-gate shim
 third_party/   NGX + Optical Flow SDK headers, stb single-header libs
 build.bat      MSVC build of the tool, the forwarder and the tests
 ```
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE).
+
+The MIT licence covers only the original code here (`src/`, `forwarder/`, `nr_video.py`, `app.py`,
+the ComfyUI nodes). It does **not** cover third-party components, which keep their own licences:
+NVIDIA DLSS / NGX and Optical Flow SDK headers and DLLs (`nvngx_dlss.dll`, `nvngx_dlssnr.dll`), ffmpeg,
+and the stb single-header libraries. Obtaining and using the NVIDIA runtime is your responsibility
+under NVIDIA's terms.
