@@ -41,8 +41,12 @@ public:
 
     ID3D12Device* Device() const { return m_device.Get(); }
     ID3D12CommandQueue* Queue() const { return m_queue.Get(); }
+    IDXGIAdapter1* Adapter() const { return m_adapter.Get(); }
     const std::string& AdapterName() const { return m_adapterName; }
     size_t AdapterVramMB() const { return m_vramMB; }
+    unsigned VendorId() const { return m_vendorId; }  // 0x10DE = NVIDIA
+    // DXGI user-mode driver version quad from CheckInterfaceSupport(IDXGIDevice); 0 if unknown.
+    uint64_t UmdDriverVersion() const { return m_umdVersion; }
 
     GpuTexture CreateTexture(int w, int h, DXGI_FORMAT fmt, bool allowUav, const wchar_t* name);
 
@@ -121,7 +125,20 @@ private:
     bool m_timestampPending = false;
     double m_lastGpuMs = 0.0;
 
+    ComPtr<IDXGIAdapter1> m_adapter;
     std::string m_adapterName;
     size_t m_vramMB = 0;
+    unsigned m_vendorId = 0;
+    uint64_t m_umdVersion = 0;
     bool m_listOpen = false;
 };
+
+// "33.0.16.1664" from a DXGI UMD version quad; "" for 0.
+std::string UmdVersionQuadString(uint64_t umd);
+// NVIDIA's own driver number from the UMD quad: the last digit of the third field followed by the
+// fourth (32.0.16.1664 -> 61664, 32.0.15.6094 -> 56094). 0 for an unknown version.
+unsigned NvidiaDriverNumber(uint64_t umd);
+// The same as text: "616.64". "" for 0.
+std::string NvidiaDriverVersionString(uint64_t umd);
+// The oldest driver DLSS Neural Rendering runs on.
+constexpr unsigned kMinNvidiaDriverForNr = 61656;  // 616.56

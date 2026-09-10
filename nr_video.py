@@ -316,7 +316,6 @@ def build_parser():
     g.add_argument("--nr-local-structure", type=float, default=1.0, help="DLSSNR.LocalStructureStrength (0-2)")
     g.add_argument("--nr-local-tone", type=float, default=1.0, help="DLSSNR.LocalToneStrength (0-2)")
     g.add_argument("--nr-skin", type=float, default=-1.0, help="DLSSNR.SkinStructureStrength (-1 = model default)")
-    g.add_argument("--nr-global-tone", type=float, default=-1.0, help="DLSSNR.GlobalToneStrength (<0 = model default)")
     g.add_argument("--nr-detail", type=float, default=1.0, help="composite strength (0 = original, 1 = full NR)")
     g.add_argument("--nr-color", type=float, default=1.0, help="0 = keep original hue, 1 = NR colour")
     g.add_argument("--nr-hdr", action="store_true", help="feed linear (HDR) instead of the sRGB proxy")
@@ -409,7 +408,7 @@ def main():
             "--nr-intensity", str(args.nr_intensity),
             "--nr-local-structure", str(args.nr_local_structure),
             "--nr-local-tone", str(args.nr_local_tone), "--nr-skin", str(args.nr_skin),
-            "--nr-global-tone", str(args.nr_global_tone), "--nr-detail", str(args.nr_detail),
+            "--nr-detail", str(args.nr_detail),
             "--nr-color", str(args.nr_color), "--nr-ui-correction", str(args.nr_ui_correction),
             "--nr-motion", str(args.nr_motion), "--nr-motion-engine", args.nr_motion_engine,
             "--nr-sr-preset", args.nr_sr_preset]

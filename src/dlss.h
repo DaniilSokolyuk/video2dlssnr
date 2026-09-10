@@ -9,6 +9,11 @@
 
 const char* NgxResultToString(NVSDK_NGX_Result r);
 
+// Version resource of a file: the VS_FIXEDFILEINFO quad ("310.8.2.0") and the StringFileInfo
+// "FileVersion" string ("310.8.SF.0"), which differ on repacked builds. Either output may be
+// null. Returns false when the file is missing or carries no version resource.
+bool ReadFileVersion(const std::wstring& path, std::string* quad, std::string* fileVersionString);
+
 // Quality modes, in the order the tool prints them.
 struct QualityMode {
     NVSDK_NGX_PerfQuality_Value value;

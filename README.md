@@ -29,7 +29,8 @@ the video script and the ComfyUI nodes are thin Python wrappers around it.
 
 ## Requirements
 
-Barely anything: an NVIDIA RTX GPU on **driver 616.56+** and **Python 3**.
+Barely anything: an NVIDIA RTX GPU on **driver 616.56 or newer** (the tool checks and tells you
+if yours is older) and **Python 3**.
 
 ## UI
 
@@ -97,7 +98,7 @@ Typical graphs:
 <p align="center"><sub><b>Load Video → DLSS Neural Rendering (Video) → Save Video</b> on a 4K clip · the <b>Image</b> node with its knobs (click to enlarge)</sub></p>
 
 Both processing nodes expose the same knobs as the CLI — `style`, `preset`, `intensity`,
-`local_structure`, `local_tone`, `skin`, `global_tone`, `detail`, `color`, `ui_correction`,
+`local_structure`, `local_tone`, `skin`, `detail`, `color`, `ui_correction`,
 `auto_mask`, `hdr`, `scale` / `width` / `height` (one side pins the aspect, both pin the exact size,
 `0` = use scale) — plus `adapter`
 (which GPU); the Video node adds `motion`, `motion_engine` (`auto` / `nvof` / `lk`), `motion_vis`
@@ -197,7 +198,6 @@ winget **Gyan.FFmpeg** install. ProRes is CPU-decoded (NVDEC can't); everything 
 | `--nr-local-structure <f>` | 1.0 | local structure strength (0–2) |
 | `--nr-local-tone <f>` | 1.0 | local tone strength (0–2) |
 | `--nr-skin <f>` | -1.0 | skin structure strength (−1 = model default) |
-| `--nr-global-tone <f>` | -1.0 | global tone strength (<0 = model default) |
 | `--nr-detail <f>` | 1.0 | composite strength: 0 = original, 1 = full NR |
 | `--nr-color <f>` | 1.0 | 0 = keep original hue, 1 = NR colour |
 | `--nr-hdr` | off | feed linear light instead of the sRGB proxy |
@@ -246,7 +246,6 @@ winget **Gyan.FFmpeg** install. ProRes is CPU-decoded (NVDEC can't); everything 
 | `--nr-local-structure <f>` | 0.0–2.0 | 1.0 | local structure strength |
 | `--nr-local-tone <f>` | 0.0–2.0 | 1.0 | local tone strength |
 | `--nr-skin <f>` | -1.0–2.0 | model default | skin structure strength (-1 or below = leave at the model's default) |
-| `--nr-global-tone <f>` | 0.0–2.0 | model default | global tone strength (below 0 = leave at default) |
 | `--nr-auto-mask` | on/off | off | the model's automatic mask |
 | `--nr-ui-correction <0\|1>` | 0 or 1 | 1 | UI correction |
 
@@ -292,7 +291,9 @@ Composition — how much of the model's output to keep (blended over the origina
 
 | Flag | Meaning |
 |---|---|
-| `--probe-nr` | try to create the NR feature and report where it stops; needs no image |
+| `--probe-nr` | create the NR feature the way the tool does and report the driver, the `nvngx_dlssnr.dll` in use and where it stops; needs no image |
+| `--probe-core` | with `--probe-nr`: also try the routes through the driver's NGX core (diagnostic only) |
+| `--nr-prime <mode>` | `none` (default) / `sr` / `core`: what to warm up before the NR feature is built; leave at the default unless asked |
 | `--probe-sl` | drive Streamline and report whether it sees DLSS-NR as supported |
 | `--nr-in <WxH>` / `--nr-out <WxH>` | probe input / output size |
 | `--sl-feature <id>` | Streamline feature id to probe (default 1004 = DLSS-NR) |

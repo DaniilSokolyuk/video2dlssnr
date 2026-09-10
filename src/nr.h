@@ -16,6 +16,19 @@
 // NGX feature id. Reserved and undocumented in the public headers.
 constexpr int kNgxFeatureNeuralRendering = 18;
 
+// How the driver's NGX backend is woken before the first forwarder create.
+//
+// None is the default and the one that works on driver 616.64+: the snippet is only ever driven
+// through the forwarder (PopulateParameters_Impl, Init_Ext, CreateFeature), and the driver core
+// is never asked to create feature 18. Core is the
+// behaviour every build before this one had - one core CreateFeature(18) first - which from
+// driver 616.64 on faults inside D3D12 (the core now routes feature 18 into snippet 310.8.0.0
+// itself). Sr creates a DLSS Super Resolution feature through the core first and keeps it alive,
+// the way a game's own DLSS would; a fallback in case Init_Ext refuses a cold process.
+enum class NrPrimeMode { None, Core, Sr };
+bool ParseNrPrimeMode(const std::string& s, NrPrimeMode* out);  // none | core | sr
+const char* NrPrimeModeName(NrPrimeMode m);
+
 // Parameter keys, taken verbatim from the strings the DLL and the addon share.
 namespace NrParam {
 constexpr const char* kEnabled = "DLSSNR.Enabled";
@@ -116,9 +129,11 @@ private:
 
 // One-shot capability probe: init, try to create feature 18, report what NGX
 // said. Prints the loaded DLL and its version so the answer is attributable.
+// The production (forwarder) route runs first; the routes that go through the driver core
+// only run with probeCore (they crash the process on driver 616.64+ with snippet 310.8.0.0).
 int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW,
                          unsigned inputH, unsigned outputW, unsigned outputH,
-                         unsigned preset, bool verbose);
+                         unsigned preset, NrPrimeMode prime, bool probeCore, bool verbose);
 
 // Runs DLSS Neural Rendering (feature 18) over an image or a whole folder via the
 // forwarder shim. inPath may be a single image or a directory (every image in it).
@@ -130,7 +145,8 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
 int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string& inPath,
                        const std::string& outDir, const NrModelParams& model, float detail,
                        float colour, bool hdr, float scale, unsigned outWReq, unsigned outHReq,
-                       unsigned srPreset, bool writeDiff, bool writeOrig, bool verbose);
+                       unsigned srPreset, NrPrimeMode prime, bool writeDiff, bool writeOrig,
+                       bool verbose);
 
 // Streaming video filter: raw RGBA frames of size inW x inH on stdin, DLSS SR + NR, raw RGBA
 // frames on stdout. Driven by ffmpeg on both ends (decode / NVENC encode). The feature is
@@ -138,4 +154,5 @@ int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string
 int RunNeuralRenderingVideo(const std::string& dllDir, int adapter, unsigned inW, unsigned inH,
                             const NrModelParams& model, float detail, float colour, bool hdr,
                             float scale, unsigned outWReq, unsigned outHReq, bool motionOn,
-                            bool motionVis, int motionEngine, unsigned srPreset, bool verbose);
+                            bool motionVis, int motionEngine, unsigned srPreset,
+                            NrPrimeMode prime, bool verbose);
