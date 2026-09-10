@@ -120,7 +120,7 @@ static int Run(int argc, char** argv) {
 
     if (o.probeNr) {
         return ProbeNeuralRendering(o.dllDir, o.adapter, o.nrInW, o.nrInH, o.nrOutW,
-                                    o.nrOutH, o.nrPreset, o.verbose);
+                                    o.nrOutH, o.nrPreset, o.nrPrime, o.probeCore, o.verbose);
     }
 
     if (o.probeSl) {
@@ -135,13 +135,12 @@ static int Run(int argc, char** argv) {
         vm.localStructure = o.nrLocalStructure;
         vm.localTone = o.nrLocalTone;
         vm.skinStructure = o.nrSkin;
-        vm.globalTone = o.nrGlobalTone;
         vm.autoMask = o.nrAutoMask ? 1u : 0u;
         vm.uiCorrection = o.nrUiCorrection ? 1u : 0u;
         return RunNeuralRenderingVideo(o.dllDir, o.adapter, o.nrInW, o.nrInH, vm, o.nrDetail,
                                        o.nrColour, o.nrHdr, o.nrScale, o.nrTargetW, o.nrTargetH,
                                        o.nrMotion, o.nrMotionVis, o.nrMotionEngine, o.nrSrPreset,
-                                       o.verbose);
+                                       o.nrPrime, o.verbose);
     }
 
     if (o.nrRun) {
@@ -153,12 +152,11 @@ static int Run(int argc, char** argv) {
         model.localStructure = o.nrLocalStructure;
         model.localTone = o.nrLocalTone;
         model.skinStructure = o.nrSkin;
-        model.globalTone = o.nrGlobalTone;
         model.autoMask = o.nrAutoMask ? 1u : 0u;
         model.uiCorrection = o.nrUiCorrection ? 1u : 0u;
         return RunNeuralRendering(o.dllDir, o.adapter, o.input, outDir, model, o.nrDetail,
                                   o.nrColour, o.nrHdr, o.nrScale, o.nrTargetW, o.nrTargetH,
-                                  o.nrSrPreset, o.nrDiff, o.nrOrig, o.verbose);
+                                  o.nrSrPreset, o.nrPrime, o.nrDiff, o.nrOrig, o.verbose);
     }
 
     // Expand the 'all' shorthands.

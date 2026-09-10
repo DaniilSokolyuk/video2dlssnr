@@ -8,7 +8,6 @@ struct NrModelParams {
     float    localStructure; // DLSSNR.LocalStructureStrength
     float    localTone;      // DLSSNR.LocalToneStrength
     float    skinStructure;  // DLSSNR.SkinStructureStrength (<0 = leave at model default)
-    float    globalTone;     // DLSSNR.GlobalToneStrength    (<0 = leave at model default)
     unsigned autoMask;       // DLSSNR.UseAutoMask: 0/1
     unsigned uiCorrection;   // DLSSNR.UICorrection: 0/1
 };

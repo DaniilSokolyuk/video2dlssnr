@@ -6,6 +6,7 @@
 
 #include "common.h"
 #include "gpu.h"
+#include "nr.h"
 
 struct Options {
     std::string input;
@@ -33,6 +34,7 @@ struct Options {
     bool verbose = false;
     // DLSS Neural Rendering (NGX feature 18) capability probe.
     bool probeNr = false;
+    bool probeCore = false;  // with --probe-nr: also run the routes through the driver core
     bool probeSl = false;
     bool nrRun = false;
     bool nrVideo = false;  // stream raw RGBA frames stdin -> SR+NR -> stdout (ffmpeg on both ends)
@@ -42,7 +44,7 @@ struct Options {
     float nrLocalStructure = 1.0f;   // DLSSNR.LocalStructureStrength
     float nrLocalTone = 1.0f;        // DLSSNR.LocalToneStrength
     float nrSkin = -1.0f;            // DLSSNR.SkinStructureStrength (<0 = model default)
-    float nrGlobalTone = -1.0f;      // DLSSNR.GlobalToneStrength    (<0 = model default)
+    NrPrimeMode nrPrime = NrPrimeMode::None;  // --nr-prime: how the NGX backend is woken
     bool nrAutoMask = false;         // DLSSNR.UseAutoMask
     bool nrUiCorrection = true;      // DLSSNR.UICorrection
     // Composition of the model's output over the original (host-side).
