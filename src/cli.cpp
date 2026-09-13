@@ -50,7 +50,7 @@ void PrintUsage() {
         "  --probe-nr           Run the production NR route (forwarder) and report the driver,\n"
         "                       the nvngx_dlssnr.dll in use and where it stops. Needs no image.\n"
         "  --probe-core         With --probe-nr: also run the diagnostic routes through the\n"
-        "                       driver core (A, P, gate, B, C). Off by default - they crash\n"
+        "                       driver core (A, gate, B, C). Off by default - they crash\n"
         "                       the process on driver 616.64+ with snippet 310.8.0.0.\n"
         "  --nr-prime <mode>    How the driver's NGX backend is woken before the NR feature is\n"
         "                       built: none (default - the snippet is only driven through the\n"

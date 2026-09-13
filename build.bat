@@ -90,7 +90,7 @@ if errorlevel 1 (
 )
 
 echo Building forwarder [nvngx.dll_dlssnr.dll]...
-cl !COMMON! /LD ^
+cl !COMMON! /LD /I "%ROOT%third_party\nvngx\include" ^
    /Fo"%ROOT%build\app\fwd_" ^
    /Fe"%ROOT%out\nvngx.dll_dlssnr.dll" ^
    "%ROOT%forwarder\nvngx_fwd.cpp" ^

@@ -19,8 +19,8 @@ constexpr int kNgxFeatureNeuralRendering = 18;
 // How the driver's NGX backend is woken before the first forwarder create.
 //
 // None is the default and the one that works on driver 616.64+: the snippet is only ever driven
-// through the forwarder (PopulateParameters_Impl, Init_Ext, CreateFeature), and the driver core
-// is never asked to create feature 18. Core is the
+// through the forwarder (Init_Ext, CreateFeature), and the driver core is never asked to create
+// feature 18. Core is the
 // behaviour every build before this one had - one core CreateFeature(18) first - which from
 // driver 616.64 on faults inside D3D12 (the core now routes feature 18 into snippet 310.8.0.0
 // itself). Sr creates a DLSS Super Resolution feature through the core first and keeps it alive,

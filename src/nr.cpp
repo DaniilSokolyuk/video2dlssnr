@@ -118,68 +118,6 @@ static void SetRes(NVSDK_NGX_Parameter* p, const char* k, GpuTexture* t) {
     NVSDK_NGX_Parameter_SetD3d12Resource(p, k, t ? t->res.Get() : nullptr);
 }
 
-// ---------------------------------------------------------------------------
-// Driving the driver core's capability block by raw vtable slot.
-//
-// Feature 18 must be created on the CORE's
-// capability parameters (GetCapabilityParameters), not a freshly allocated
-// block - the capability block carries the snippet/preset callbacks a feature
-// needs at create time; a fresh one has none, so CreateFeature answers
-// UnableToInitializeFeature (0xBAD0000B). And that block does not lay its
-// setters out the way the SDK header declares: uint is slot 3, resources go
-// through slot 0 (the ULL setter), and the float setter is not at the header's
-// slot 1 - it is found by round-tripping a value. The typed Get() works, which
-// is what makes probing possible.
-namespace {
-using PfnSetULL = void(NVSDK_CONV*)(void*, const char*, unsigned long long);
-using PfnSetFloatVt = void(NVSDK_CONV*)(void*, const char*, float);
-using PfnSetUIntVt = void(NVSDK_CONV*)(void*, const char*, unsigned int);
-constexpr int kVtSetULL = 0;
-int g_floatSlot = -1;
-int g_uintSlot = 3;
-
-void VSetUInt(void* p, const char* n, unsigned v) {
-    void** vt = *reinterpret_cast<void***>(p);
-    reinterpret_cast<PfnSetUIntVt>(vt[g_uintSlot])(p, n, v);
-}
-void DiscoverUIntSlot(NVSDK_NGX_Parameter* p) {
-    void** vt = *reinterpret_cast<void***>(p);
-    for (int slot = 0; slot < 8; ++slot) {
-        const unsigned probe = 0x1234u;
-        unsigned rb = 0;
-        reinterpret_cast<PfnSetUIntVt>(vt[slot])(p, "DLSSNR.UProbe", probe);
-        if (NVSDK_NGX_Parameter_GetUI(p, "DLSSNR.UProbe", &rb) == NVSDK_NGX_Result_Success &&
-            rb == probe) {
-            g_uintSlot = slot;
-            return;
-        }
-    }
-}
-void VSetRes(void* p, const char* n, ID3D12Resource* r) {
-    void** vt = *reinterpret_cast<void***>(p);
-    reinterpret_cast<PfnSetULL>(vt[kVtSetULL])(p, n, reinterpret_cast<unsigned long long>(r));
-}
-void VSetFloat(void* p, const char* n, float v) {
-    void** vt = *reinterpret_cast<void***>(p);
-    reinterpret_cast<PfnSetFloatVt>(vt[g_floatSlot < 0 ? 1 : g_floatSlot])(p, n, v);
-}
-void DiscoverFloatSlot(NVSDK_NGX_Parameter* p) {
-    if (g_floatSlot >= 0) return;
-    void** vt = *reinterpret_cast<void***>(p);
-    for (int slot = 0; slot < 8; ++slot) {
-        const float probe = 0.3125f;  // exact in binary
-        float rb = 0.0f;
-        reinterpret_cast<PfnSetFloatVt>(vt[slot])(p, "DLSSNR.Probe", probe);
-        if (NVSDK_NGX_Parameter_GetF(p, "DLSSNR.Probe", &rb) == NVSDK_NGX_Result_Success &&
-            rb == probe) {
-            g_floatSlot = slot;
-            return;
-        }
-    }
-    g_floatSlot = 1;
-}
-}  // namespace
-
 void NrFeature::FillCreateParams(NVSDK_NGX_Parameter* p, const NrFeatureDesc& desc) {
     // Node masks, as every NGX feature expects.
     SetU(p, NVSDK_NGX_Parameter_CreationNodeMask, 1);
@@ -336,15 +274,14 @@ namespace {
 struct ForwarderApi {
     HMODULE mod = nullptr;
     std::wstring path;
-    void (*setSlots)(int, int) = nullptr;
     void* (*create)(const wchar_t*, const wchar_t*, ID3D12Device*, ID3D12GraphicsCommandList*,
-                    void*, unsigned, unsigned, unsigned, unsigned, const NrModelParams*) = nullptr;
-    int (*evaluate)(ID3D12GraphicsCommandList*, void*, void*, ID3D12Resource*, ID3D12Resource*,
-                    ID3D12Resource*, ID3D12Resource*, unsigned, unsigned, unsigned, unsigned,
-                    int) = nullptr;
+                    NVSDK_NGX_Parameter*, unsigned, unsigned, unsigned, unsigned,
+                    const NrModelParams*) = nullptr;
+    int (*evaluate)(ID3D12GraphicsCommandList*, void*, NVSDK_NGX_Parameter*, ID3D12Resource*,
+                    ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, unsigned, unsigned, unsigned,
+                    unsigned, int) = nullptr;
     void (*release)(void*) = nullptr;
     // Result codes and the last caught fault. Null on a forwarder build without them.
-    const int* lastPopulate = nullptr;
     const int* lastInit = nullptr;
     const int* lastCreate = nullptr;
     const int* excStage = nullptr;
@@ -362,11 +299,9 @@ struct ForwarderApi {
         path = p;
         mod = LoadLibraryExW(p.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!mod) return false;
-        setSlots = reinterpret_cast<decltype(setSlots)>(GetProcAddress(mod, "fwd_set_slots"));
         create = reinterpret_cast<decltype(create)>(GetProcAddress(mod, "fwd_create"));
         evaluate = reinterpret_cast<decltype(evaluate)>(GetProcAddress(mod, "fwd_evaluate"));
         release = reinterpret_cast<decltype(release)>(GetProcAddress(mod, "fwd_release"));
-        lastPopulate = reinterpret_cast<const int*>(GetProcAddress(mod, "fwd_last_populate"));
         lastInit = reinterpret_cast<const int*>(GetProcAddress(mod, "fwd_last_init"));
         lastCreate = reinterpret_cast<const int*>(GetProcAddress(mod, "fwd_last_create"));
         excStage = reinterpret_cast<const int*>(GetProcAddress(mod, "fwd_last_exception_stage"));
@@ -379,7 +314,6 @@ struct ForwarderApi {
         return create && evaluate;
     }
     bool Crashed() const { return excStage && *excStage != 0; }
-    int Populate() const { return lastPopulate ? *lastPopulate : 0; }
     int Init() const { return lastInit ? *lastInit : 0; }
     int Create() const { return lastCreate ? *lastCreate : 0; }
 };
@@ -485,19 +419,18 @@ bool CheckDriverForNr(const GpuContext& gpu) {
 // second fault in ngx.Shutdown() would bury this report, so the process exits here.
 void LogForwarderFailure(const ForwarderApi& fwd, const char* what) {
     const int cc = fwd.Create();
-    LogErr("%s (populate=0x%08X init=%d create=0x%08X %s)", what,
-           static_cast<unsigned>(fwd.Populate()), fwd.Init(), static_cast<unsigned>(cc),
+    LogErr("%s (init=%d create=0x%08X %s)", what, fwd.Init(), static_cast<unsigned>(cc),
            NgxResultToString(static_cast<NVSDK_NGX_Result>(cc)));
     if (fwd.Crashed()) {
-        static const char* kStage[] = {"-", "PopulateParameters_Impl", "Init_Ext", "CreateFeature",
-                                       "EvaluateFeature", "ReleaseFeature"};
+        static const char* kStage[] = {"-", "Init_Ext", "CreateFeature", "EvaluateFeature",
+                                       "ReleaseFeature"};
         const int stage = *fwd.excStage;
         const unsigned long long a = fwd.excAddr ? *fwd.excAddr : 0ull;
         const unsigned long long b = fwd.excModBase ? *fwd.excModBase : 0ull;
         const std::string mod =
             (fwd.excModule && *fwd.excModule) ? Widen2Narrow(std::wstring(fwd.excModule)) : "?";
         LogErr("  snippet %s faulted: exception 0x%08X at 0x%llX (%s+0x%llX)",
-               (stage >= 0 && stage <= 5) ? kStage[stage] : "?",
+               (stage >= 0 && stage <= 4) ? kStage[stage] : "?",
                fwd.excCode ? *fwd.excCode : 0u, a, mod.c_str(), b ? a - b : 0ull);
         LogErr("  the D3D12/NGX state is undefined after a caught fault; exiting without NGX teardown");
         fflush(stdout);
@@ -655,8 +588,8 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
     // ---- route F: the forwarder - the production path -------------------------
     //      A shim DLL named nvngx.dll_dlssnr.dll makes the NGX calls, so the
     //      snippet's caller check (path must contain "nvngx.dll") passes, and we
-    //      drive the snippet's OWN PopulateParameters + Init_Ext + CreateFeature(18)
-    //      on the core's capability block. The core is never asked for feature 18.
+    //      drive the snippet's OWN Init_Ext + CreateFeature(18) on a block of our
+    //      own. The core is never asked for feature 18.
     std::unique_ptr<DlssFeature> primeSr;
     if (prime == NrPrimeMode::Sr) primeSr = PrimeWithSr(gpu, ngx, outputW, outputH, 0);
     if (prime == NrPrimeMode::Core) PrimeWithCore(gpu, ngx, inputW, inputH, preset);
@@ -665,17 +598,14 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
     int rcF = 1;
     {
         ForwarderApi fwd;
-        NVSDK_NGX_Parameter* capsF = ngx.CapabilityParams();
+        NVSDK_NGX_Parameter* nrParams = nullptr;
         if (!fwd.Load()) {
             LogInfo("    could not load forwarder %s (err %lu)", Widen2Narrow(fwd.path).c_str(),
                     GetLastError());
-        } else if (!capsF) {
-            LogInfo("    no capability params from the core");
+        } else if (NVSDK_NGX_FAILED(NVSDK_NGX_D3D12_AllocateParameters(&nrParams)) || !nrParams) {
+            LogInfo("    AllocateParameters failed");
         } else {
-            DiscoverFloatSlot(capsF);
-            DiscoverUIntSlot(capsF);
-            if (fwd.setSlots) fwd.setSlots(g_uintSlot, g_floatSlot);
-            LogInfo("    forwarder loaded; vtable slots uint=%d float=%d", g_uintSlot, g_floatSlot);
+            LogInfo("    forwarder loaded from %s", Widen2Narrow(fwd.path).c_str());
 
             NrModelParams pm{};
             pm.preset = preset;
@@ -687,12 +617,10 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
             pm.autoMask = 0;
             pm.uiCorrection = 1;
             ID3D12GraphicsCommandList* cl = gpu.Begin();
-            void* handle = fwd.create(snippetPath.c_str(), dataPath.c_str(), gpu.Device(), cl, capsF,
-                                      inputW, inputH, outputW, outputH, &pm);
+            void* handle = fwd.create(snippetPath.c_str(), dataPath.c_str(), gpu.Device(), cl,
+                                      nrParams, inputW, inputH, outputW, outputH, &pm);
             gpu.EndAndWait();
-            LogInfo("    snippet PopulateParameters -> 0x%08X, Init_Ext -> %d, CreateFeature 18 -> "
-                    "0x%08X, handle=%p",
-                    static_cast<unsigned>(fwd.Populate()), fwd.Init(),
+            LogInfo("    snippet Init_Ext -> %d, CreateFeature 18 -> 0x%08X, handle=%p", fwd.Init(),
                     static_cast<unsigned>(fwd.Create()), handle);
             if (!handle) {
                 LogForwarderFailure(fwd, "    route F: CreateFeature 18 failed");
@@ -704,7 +632,7 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
                 gpu.Transition(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 gpu.Transition(motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 gpu.Transition(out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                const int er = fwd.evaluate(cl2, handle, capsF, color.res.Get(), depth.res.Get(),
+                const int er = fwd.evaluate(cl2, handle, nrParams, color.res.Get(), depth.res.Get(),
                                             motion.res.Get(), out.res.Get(), inputW, inputH, outputW,
                                             outputH, 1);
                 gpu.EndAndWait();
@@ -723,6 +651,7 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
                 gpu.EndAndWait();
             }
         }
+        if (nrParams) NVSDK_NGX_D3D12_DestroyParameters(nrParams);
     }
 
     // What the driver core itself says about feature 18 on this adapter. A pure capability
@@ -735,7 +664,7 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
     // are opt-in diagnostics, not part of the answer.
     if (!probeCore && prime != NrPrimeMode::Core) {
         LogInfo("");
-        LogInfo("core routes (A, P, gate, B, C) skipped: pass --probe-core to run them; they crash "
+        LogInfo("core routes (A, gate, B, C) skipped: pass --probe-core to run them; they crash "
                 "the process on driver 616.64+ with snippet 310.8.0.0.");
         primeSr.reset();
         ngx.Shutdown();
@@ -772,94 +701,6 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
     }
     if (coreResult == NVSDK_NGX_Result_FAIL_OutOfDate) {
         LogInfo("    the core rejected the feature id before reaching the snippet");
-    }
-
-    // ---- route P: core CreateFeature 18 on the driver's CAPABILITY block -----
-    //      (not a fresh one), setters by raw vtable slot.
-    LogInfo("");
-    LogInfo("route P - core CreateFeature 18 on capability params:");
-    {
-        NVSDK_NGX_Parameter* caps = ngx.CapabilityParams();
-        if (!caps) {
-            LogInfo("    no capability params from the core");
-        } else {
-            DiscoverFloatSlot(caps);
-            DiscoverUIntSlot(caps);
-            LogInfo("    vtable slots: uint=%d float=%d", g_uintSlot, g_floatSlot);
-            // verify the uint setter actually lands
-            VSetUInt(caps, "Width", inputW);
-            unsigned wcheck = 0;
-            NVSDK_NGX_Parameter_GetUI(caps, "Width", &wcheck);
-            LogInfo("    readback Width = %u (set %u)", wcheck, inputW);
-
-            // Generic NGX size params - the create path (shared with the DLSS/DLAA
-            // framework NR is built on) reads "Width"/"Height", not only the
-            // DLSSNR-prefixed ones. A fresh capability block has neither until we set
-            // them; a game's live block already carried them.
-            VSetUInt(caps, "Width", inputW);
-            VSetUInt(caps, "Height", inputH);
-            VSetUInt(caps, "OutWidth", outputW);
-            VSetUInt(caps, "OutHeight", outputH);
-            VSetUInt(caps, "DLSS.Render.Subrect.Dimensions.Width", inputW);
-            VSetUInt(caps, "DLSS.Render.Subrect.Dimensions.Height", inputH);
-            VSetUInt(caps, "PerfQualityValue", 2);  // MaxQuality/DLAA
-
-            VSetUInt(caps, "DLSSNR.Enabled", 1);
-            VSetUInt(caps, "DLSSNR.Width", inputW);
-            VSetUInt(caps, "DLSSNR.Height", inputH);
-            VSetUInt(caps, "CreationNodeMask", 1);
-            VSetUInt(caps, "VisibilityNodeMask", 1);
-            VSetUInt(caps, "DLSSNR.Hint.Render.Preset", preset);
-            VSetFloat(caps, "DLSSNR.Intensity", 1.0f);
-            VSetUInt(caps, "DLSSNR.Style", 0);
-            VSetFloat(caps, "DLSSNR.LocalStructureStrength", 1.0f);
-            VSetFloat(caps, "DLSSNR.LocalToneStrength", 1.0f);
-            VSetFloat(caps, "DLSSNR.SkinStructureStrength", 1.0f);
-            VSetUInt(caps, "DLSSNR.UseAutoMask", 0);
-            VSetUInt(caps, "DLSSNR.UICorrection", 1);
-
-            NVSDK_NGX_Handle* h = nullptr;
-            ID3D12GraphicsCommandList* cl = gpu.Begin();
-            NVSDK_NGX_Result cr =
-                NVSDK_NGX_D3D12_CreateFeature(cl, static_cast<NVSDK_NGX_Feature>(18), caps, &h);
-            gpu.EndAndWait();
-            report("core CreateFeature 18 (caps)", cr);
-
-            if (!NVSDK_NGX_FAILED(cr) && h) {
-                VSetRes(caps, "DLSSNR.Color", color.res.Get());
-                VSetRes(caps, "DLSSNR.Depth", depth.res.Get());
-                VSetRes(caps, "DLSSNR.MVec", motion.res.Get());
-                VSetRes(caps, "DLSSNR.Output", out.res.Get());
-                VSetUInt(caps, "DLSSNR.Enabled", 1);
-                VSetUInt(caps, "DLSSNR.Width", inputW);
-                VSetUInt(caps, "DLSSNR.Height", inputH);
-                VSetUInt(caps, "DLSSNR.DepthInverted", 0);
-                VSetUInt(caps, "DLSSNR.Reset", 1);
-                VSetUInt(caps, "DLSSNR.ColorSubrectWidth", inputW);
-                VSetUInt(caps, "DLSSNR.ColorSubrectHeight", inputH);
-                VSetUInt(caps, "DLSSNR.OutputSubrectWidth", outputW);
-                VSetUInt(caps, "DLSSNR.OutputSubrectHeight", outputH);
-                VSetUInt(caps, "DLSSNR.DepthSubrectWidth", inputW);
-                VSetUInt(caps, "DLSSNR.DepthSubrectHeight", inputH);
-                VSetUInt(caps, "DLSSNR.MVecSubrectWidth", inputW);
-                VSetUInt(caps, "DLSSNR.MVecSubrectHeight", inputH);
-                VSetFloat(caps, "DLSSNR.MVecScaleX", 1.0f);
-                VSetFloat(caps, "DLSSNR.MVecScaleY", 1.0f);
-
-                ID3D12GraphicsCommandList* cl2 = gpu.Begin();
-                NVSDK_NGX_Result er = NVSDK_NGX_D3D12_EvaluateFeature(cl2, h, caps, nullptr);
-                gpu.EndAndWait();
-                report("core EvaluateFeature 18 (caps)", er);
-                NVSDK_NGX_D3D12_ReleaseFeature(h);
-                if (!NVSDK_NGX_FAILED(er)) {
-                    primeSr.reset();
-                    ngx.Shutdown();
-                    LogInfo("");
-                    LogInfo("Neural Rendering RAN via route P.");
-                    return 0;
-                }
-            }
-        }
     }
 
     // ---- which feature ids does THIS driver core even admit? ----------------
@@ -1377,21 +1218,20 @@ int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string
 
     NgxSession ngx;
     ngx.Init(gpu.Device(), DefaultDllSearchPaths(dllDir), verbose);
-    NVSDK_NGX_Parameter* caps = ngx.CapabilityParams();
-    if (!caps) {
-        LogErr("no capability parameters from the core");
+    // The NR feature's own parameter block; the snippet reads it directly.
+    NVSDK_NGX_Parameter* nrParams = nullptr;
+    if (NVSDK_NGX_FAILED(NVSDK_NGX_D3D12_AllocateParameters(&nrParams)) || !nrParams) {
+        LogErr("NVSDK_NGX_D3D12_AllocateParameters failed");
         return 1;
     }
-    DiscoverFloatSlot(caps);
-    DiscoverUIntSlot(caps);
 
     ForwarderApi fwd;
     if (!fwd.Load()) {
         LogErr("could not load forwarder %s (err %lu)", Widen2Narrow(fwd.path).c_str(),
                GetLastError());
+        NVSDK_NGX_D3D12_DestroyParameters(nrParams);
         return 1;
     }
-    if (fwd.setSlots) fwd.setSlots(g_uintSlot, g_floatSlot);
 
     fs::create_directories(Narrow2Widen(outDir), ec);
 
@@ -1472,7 +1312,7 @@ int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string
             gpu.EndAndWait();
 
             // By default nothing is asked of the driver core for feature 18: the forwarder drives
-            // the snippet's own PopulateParameters + Init_Ext + CreateFeature. --nr-prime picks
+            // the snippet's own Init_Ext + CreateFeature. --nr-prime picks
             // the two older warm-ups. In the upscale case UpscaleTo() has already left a live
             // DLSS SR feature in srCache, which is what the sr mode would create.
             if (!primed) {
@@ -1485,8 +1325,8 @@ int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string
             }
 
             ID3D12GraphicsCommandList* clc = gpu.Begin();
-            feature = fwd.create(snippetPath.c_str(), dataPath.c_str(), gpu.Device(), clc, caps, tW,
-                                 tH, tW, tH, &model);
+            feature = fwd.create(snippetPath.c_str(), dataPath.c_str(), gpu.Device(), clc, nrParams,
+                                 tW, tH, tW, tH, &model);
             gpu.EndAndWait();
             if (!feature) {
                 char what[96];
@@ -1520,7 +1360,7 @@ int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string
         gpu.Transition(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         gpu.Transition(motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         gpu.Transition(out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        const int er = fwd.evaluate(cle, feature, caps, color.res.Get(), depth.res.Get(),
+        const int er = fwd.evaluate(cle, feature, nrParams, color.res.Get(), depth.res.Get(),
                                     motion.res.Get(), out.res.Get(), tW, tH, tW, tH, 1);
         gpu.EndAndWait();
         tNrEval += ms(t0, Clock::now());
@@ -1575,6 +1415,7 @@ int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string
     }
 
     if (feature) fwd.release(feature);
+    NVSDK_NGX_D3D12_DestroyParameters(nrParams);
     primeSr.reset();
     srCache.clear();  // release the DLSS SR features before NGX shuts down
     ngx.Shutdown();
@@ -1681,21 +1522,20 @@ int RunNeuralRenderingVideo(const std::string& dllDir, int adapter, unsigned inW
 
     NgxSession ngx;
     ngx.Init(gpu.Device(), DefaultDllSearchPaths(dllDir), verbose);
-    NVSDK_NGX_Parameter* caps = ngx.CapabilityParams();
-    if (!caps) {
-        LogErr("no capability parameters from the core");
+    // The NR feature's own parameter block; the snippet reads it directly.
+    NVSDK_NGX_Parameter* nrParams = nullptr;
+    if (NVSDK_NGX_FAILED(NVSDK_NGX_D3D12_AllocateParameters(&nrParams)) || !nrParams) {
+        LogErr("NVSDK_NGX_D3D12_AllocateParameters failed");
         return 1;
     }
-    DiscoverFloatSlot(caps);
-    DiscoverUIntSlot(caps);
 
     ForwarderApi fwd;
     if (!fwd.Load()) {
         LogErr("could not load forwarder %s (err %lu)", Widen2Narrow(fwd.path).c_str(),
                GetLastError());
+        NVSDK_NGX_D3D12_DestroyParameters(nrParams);
         return 1;
     }
-    if (fwd.setSlots) fwd.setSlots(g_uintSlot, g_floatSlot);
 
     GpuTexture color = gpu.CreateTexture((int) tW, (int) tH, DXGI_FORMAT_R16G16B16A16_FLOAT, true,
                                          L"nrColor");
@@ -1738,11 +1578,12 @@ int RunNeuralRenderingVideo(const std::string& dllDir, int adapter, unsigned inW
     }
 
     ID3D12GraphicsCommandList* clc = gpu.Begin();
-    void* feature = fwd.create(snippetPath.c_str(), dataPath.c_str(), gpu.Device(), clc, caps, tW,
-                               tH, tW, tH, &model);
+    void* feature = fwd.create(snippetPath.c_str(), dataPath.c_str(), gpu.Device(), clc, nrParams,
+                               tW, tH, tW, tH, &model);
     gpu.EndAndWait();
     if (!feature) {
         LogForwarderFailure(fwd, "CreateFeature 18 failed for the video stream");
+        NVSDK_NGX_D3D12_DestroyParameters(nrParams);
         primeSr.reset();
         srCache.clear();
         ngx.Shutdown();
@@ -1905,7 +1746,7 @@ int RunNeuralRenderingVideo(const std::string& dllDir, int adapter, unsigned inW
             gpu.Transition(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             gpu.Transition(motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             gpu.Transition(out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            const int er = fwd.evaluate(cle, feature, caps, color.res.Get(), depth.res.Get(),
+            const int er = fwd.evaluate(cle, feature, nrParams, color.res.Get(), depth.res.Get(),
                                         motion.res.Get(), out.res.Get(), tW, tH, tW, tH,
                                         vf.reset ? 1 : 0);
             gpu.EndAndWait();
@@ -1943,6 +1784,7 @@ int RunNeuralRenderingVideo(const std::string& dllDir, int adapter, unsigned inW
 
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     fwd.release(feature);
+    NVSDK_NGX_D3D12_DestroyParameters(nrParams);
     if (nvofActive)
         nvof.Shutdown();
     else if (flowEnabled)
