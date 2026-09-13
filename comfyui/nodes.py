@@ -49,14 +49,13 @@ def find_exe():
         "folder of a video2dlssnr release into: " + os.path.join(HERE, "bin"))
 
 
-def nr_args(style, preset, intensity, local_structure, local_tone, skin, global_tone, detail,
+def nr_args(style, preset, intensity, local_structure, local_tone, skin, detail,
             color, ui_correction, auto_mask, hdr, sr_preset="Default"):
     """NR model + composite flags, named exactly like the CLI (--nr-*)."""
     a = ["--nr-sr-preset", "default" if sr_preset == "Default" else sr_preset,
          "--nr-style", str(STYLES[style]), "--nr-preset", str(PRESETS[preset]),
          "--nr-intensity", f"{intensity}", "--nr-local-structure", f"{local_structure}",
-         "--nr-local-tone", f"{local_tone}", "--nr-skin", f"{skin}",
-         "--nr-global-tone", f"{global_tone}", "--nr-detail", f"{detail}",
+         "--nr-local-tone", f"{local_tone}", "--nr-skin", f"{skin}", "--nr-detail", f"{detail}",
          "--nr-color", f"{color}", "--nr-ui-correction", "1" if ui_correction else "0"]
     if auto_mask:
         a.append("--nr-auto-mask")
@@ -208,7 +207,6 @@ def _nr_inputs():
         "local_structure": f(1.0, 0.0, 2.0),
         "local_tone": f(1.0, 0.0, 2.0),
         "skin": f(-1.0, -1.0, 2.0),          # -1 = model default
-        "global_tone": f(-1.0, -1.0, 2.0),   # <0 = model default
         "detail": f(1.0, 0.0, 2.0),          # composite: 0 = original, 1 = full NR
         "color": f(1.0, 0.0, 1.0),           # 0 = keep original hue, 1 = NR colour
         "ui_correction": ("BOOLEAN", {"default": False}),
@@ -248,10 +246,10 @@ class DLSSNRImage:
     DESCRIPTION = ("DLSS Super Resolution + Neural Rendering on each image independently "
                    "(same as the Image tab). width pins the output width, else scale.")
 
-    def run(self, image, style, preset, intensity, local_structure, local_tone, skin, global_tone,
+    def run(self, image, style, preset, intensity, local_structure, local_tone, skin,
             detail, color, ui_correction, auto_mask, hdr, scale, width, height, adapter, sr_preset):
         exe = find_exe()
-        nr = nr_args(style, preset, intensity, local_structure, local_tone, skin, global_tone,
+        nr = nr_args(style, preset, intensity, local_structure, local_tone, skin,
                      detail, color, ui_correction, auto_mask, hdr, sr_preset)
         src = to_u8(image)
         outs = [run_image_np(src[i], width, scale, nr, exe, adapter, height)
@@ -298,7 +296,7 @@ class DLSSNRVideo:
                    "temporal stability (same as the Video tab). Connect the core Load Video (VIDEO) "
                    "or an IMAGE batch; get frames and a ready VIDEO (audio and fps kept) back.")
 
-    def run(self, style, preset, intensity, local_structure, local_tone, skin, global_tone,
+    def run(self, style, preset, intensity, local_structure, local_tone, skin,
             detail, color, ui_correction, auto_mask, hdr, scale, width, height, adapter, sr_preset,
             motion, motion_engine, motion_vis, video=None, images=None, images_fps=24.0):
         audio, frame_rate = None, None
@@ -311,7 +309,7 @@ class DLSSNRVideo:
             frame_rate = Fraction(images_fps).limit_denominator(1000)
 
         exe = find_exe()
-        nr = nr_args(style, preset, intensity, local_structure, local_tone, skin, global_tone,
+        nr = nr_args(style, preset, intensity, local_structure, local_tone, skin,
                      detail, color, ui_correction, auto_mask, hdr, sr_preset)
         src = to_u8(images)
         total = src.shape[0]

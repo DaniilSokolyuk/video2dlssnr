@@ -93,13 +93,12 @@ AUDIO = ["auto", "copy", "aac", "opus", "flac", "none"]
 PRORES_PROFILES = ["proxy", "lt", "standard", "hq", "4444", "4444xq"]
 
 
-def nr_model_args(style, preset, intensity, local_structure, local_tone, skin, global_tone,
+def nr_model_args(style, preset, intensity, local_structure, local_tone, skin,
                   detail, color, ui_correction, auto_mask, hdr):
     """The NR model + composite flags shared by both tabs (same names as the CLI)."""
     a = ["--nr-style", str(STYLES[style]), "--nr-preset", str(PRESETS[preset]),
          "--nr-intensity", str(intensity), "--nr-local-structure", str(local_structure),
-         "--nr-local-tone", str(local_tone), "--nr-skin", str(skin),
-         "--nr-global-tone", str(global_tone), "--nr-detail", str(detail),
+         "--nr-local-tone", str(local_tone), "--nr-skin", str(skin), "--nr-detail", str(detail),
          "--nr-color", str(color), "--nr-ui-correction", "1" if ui_correction else "0"]
     if auto_mask:
         a += ["--nr-auto-mask"]
@@ -154,14 +153,13 @@ def size_args_video(size, width, height, scale):
 
 
 def run_image(image, size, width, height, scale, sr_preset, style, preset, intensity,
-              local_structure, local_tone, skin, global_tone, detail, color, ui_correction,
-              auto_mask, hdr):
+              local_structure, local_tone, skin, detail, color, ui_correction, auto_mask, hdr):
     if not image:
         return None, "Drop an image first."
     os.makedirs(OUT_DIR, exist_ok=True)
     args = [EXE, "--nr-run", "--in", image, "--out", OUT_DIR, "--nr-sr-preset", SR_PRESETS[sr_preset]]
     args += nr_model_args(style, preset, intensity, local_structure, local_tone, skin,
-                          global_tone, detail, color, ui_correction, auto_mask, hdr)
+                          detail, color, ui_correction, auto_mask, hdr)
     args += size_args_image(image, size, width, height, scale)
     before = set(glob.glob(os.path.join(OUT_DIR, "*_nr.png")))
     p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -217,7 +215,7 @@ def _stream(proc):
 
 
 def run_video(video, engine, motion, motion_vis, size, width, height, scale, sr_preset, style,
-              preset, intensity, local_structure, local_tone, skin, global_tone, detail, color,
+              preset, intensity, local_structure, local_tone, skin, detail, color,
               ui_correction, auto_mask, hdr, codec_label, container, quality, cq, bitrate,
               bit_depth, enc_preset, prores_profile, audio, frames):
     if not video:
@@ -240,7 +238,7 @@ def run_video(video, engine, motion, motion_vis, size, width, height, scale, sr_
     else:
         args += ["--cq", str(int(cq)), "--bitrate", str(int(bitrate))]
     args += nr_model_args(style, preset, intensity, local_structure, local_tone, skin,
-                          global_tone, detail, color, ui_correction, auto_mask, hdr)
+                          detail, color, ui_correction, auto_mask, hdr)
     args += size_args_video(size, width, height, scale)
     if motion_vis:
         args += ["--nr-motion-vis"]
@@ -277,7 +275,6 @@ def nr_controls():
         local_tone = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="Local tone")
     with gr.Row():
         skin = gr.Slider(-1.0, 2.0, value=-1.0, step=0.05, label="Skin (-1 = model default)")
-        global_tone = gr.Slider(-1.0, 2.0, value=-1.0, step=0.05, label="Global tone (<0 = default)")
     with gr.Row():
         detail = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="Composite detail (0=original)")
         color = gr.Slider(0.0, 1.0, value=1.0, step=0.05, label="Composite colour")
@@ -285,7 +282,7 @@ def nr_controls():
         ui_correction = gr.Checkbox(value=False, label="UI correction")
         auto_mask = gr.Checkbox(value=False, label="Auto mask")
         hdr = gr.Checkbox(value=False, label="HDR (linear)")
-    return [style, preset, intensity, local_structure, local_tone, skin, global_tone, detail,
+    return [style, preset, intensity, local_structure, local_tone, skin, detail,
             color, ui_correction, auto_mask, hdr]
 
 

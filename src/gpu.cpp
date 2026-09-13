@@ -261,9 +261,17 @@ void GpuContext::Initialize(bool enableDebugLayer, int adapterIndex) {
         chosen = adapter;
         m_adapterName = Widen2Narrow(desc.Description);
         m_vramMB = desc.DedicatedVideoMemory / (1024 * 1024);
+        m_vendorId = desc.VendorId;
         break;
     }
     if (!chosen) throw ToolError("no Direct3D 12 capable adapter found");
+    m_adapter = chosen;
+    {
+        LARGE_INTEGER umd{};
+        if (SUCCEEDED(chosen->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd))) {
+            m_umdVersion = static_cast<uint64_t>(umd.QuadPart);
+        }
+    }
 
     CHECK_HR(D3D12CreateDevice(chosen.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device)));
 
@@ -336,7 +344,32 @@ void GpuContext::Shutdown() {
     m_alloc.Reset();
     m_queue.Reset();
     m_device.Reset();
+    m_adapter.Reset();
     m_factory.Reset();
+}
+
+std::string UmdVersionQuadString(uint64_t umd) {
+    if (umd == 0) return {};
+    char b[48];
+    snprintf(b, sizeof(b), "%u.%u.%u.%u", static_cast<unsigned>((umd >> 48) & 0xFFFF),
+             static_cast<unsigned>((umd >> 32) & 0xFFFF), static_cast<unsigned>((umd >> 16) & 0xFFFF),
+             static_cast<unsigned>(umd & 0xFFFF));
+    return b;
+}
+
+unsigned NvidiaDriverNumber(uint64_t umd) {
+    if (umd == 0) return 0;
+    const unsigned f3 = static_cast<unsigned>((umd >> 16) & 0xFFFF);
+    const unsigned f4 = static_cast<unsigned>(umd & 0xFFFF);
+    return (f3 % 10u) * 10000u + f4;  // 16,1664 -> 61664
+}
+
+std::string NvidiaDriverVersionString(uint64_t umd) {
+    const unsigned v = NvidiaDriverNumber(umd);
+    if (v == 0) return {};
+    char b[32];
+    snprintf(b, sizeof(b), "%u.%02u", v / 100u, v % 100u);
+    return b;
 }
 
 void GpuContext::CreateDownsamplePipeline() {

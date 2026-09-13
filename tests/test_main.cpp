@@ -10,6 +10,7 @@
 // CPU only:            video2dlssnr_tests.exe --no-gpu
 // One group:           video2dlssnr_tests.exe --filter Downsample
 
+#include "archspoof.h"
 #include "cli.h"
 #include "common.h"
 #include "dlss.h"
@@ -389,6 +390,48 @@ static void Test_ParseArgsValues() {
     EXPECT_TRUE(help);
     // --help must short-circuit before the "--in is required" check.
     EXPECT_NO_THROW(ParseCli({"-h"}));
+}
+
+static void Test_ParseArgsNrPrime() {
+    EXPECT_TRUE(ParseCli({"--in", "a.png"}).nrPrime == NrPrimeMode::None);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-prime", "sr"}).nrPrime == NrPrimeMode::Sr);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-prime", "CORE"}).nrPrime == NrPrimeMode::Core);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-prime", "none"}).nrPrime == NrPrimeMode::None);
+    EXPECT_THROWS(ParseCli({"--in", "a.png", "--nr-prime", "yes"}));
+    EXPECT_FALSE(ParseCli({"--probe-nr"}).probeCore);
+    EXPECT_TRUE(ParseCli({"--probe-nr", "--probe-core"}).probeCore);
+    // Removed: the model never read this key.
+    EXPECT_THROWS(ParseCli({"--in", "a.png", "--nr-global-tone", "1"}));
+    NrPrimeMode m = NrPrimeMode::Sr;
+    EXPECT_FALSE(ParseNrPrimeMode("", &m));
+    EXPECT_TRUE(ParseNrPrimeMode("Sr", &m) && m == NrPrimeMode::Sr);
+    EXPECT_EQ(std::string(NrPrimeModeName(NrPrimeMode::Core)), std::string("core"));
+}
+
+static void Test_ArchSpoofFlag() {
+    EXPECT_TRUE(ParseCli({"--in", "a.png"}).nrArchSpoof);
+    EXPECT_FALSE(ParseCli({"--in", "a.png", "--nr-arch-spoof", "0"}).nrArchSpoof);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-arch-spoof", "1"}).nrArchSpoof);
+    EXPECT_EQ(std::string(NvArchName(0x172)), std::string("Ampere"));
+    EXPECT_EQ(std::string(NvArchName(0x194)), std::string("Ada"));
+    EXPECT_EQ(std::string(NvArchName(0x1B0)), std::string("Blackwell"));
+    EXPECT_EQ(std::string(NvArchName(0x1A0)), std::string("Blackwell"));
+    EXPECT_EQ(std::string(NvArchName(0x160)), std::string("Turing"));
+    EXPECT_EQ(std::string(NvArchName(0)), std::string("unknown"));
+}
+
+static void Test_DriverVersionString() {
+    // DXGI UMD quad 32.0.16.1664 is NVIDIA 616.64; 32.0.15.6094 is 560.94.
+    const uint64_t v61664 = (uint64_t(32) << 48) | (uint64_t(0) << 32) | (uint64_t(16) << 16) | 1664;
+    const uint64_t v56094 = (uint64_t(32) << 48) | (uint64_t(0) << 32) | (uint64_t(15) << 16) | 6094;
+    EXPECT_EQ(NvidiaDriverVersionString(v61664), std::string("616.64"));
+    EXPECT_EQ(NvidiaDriverVersionString(v56094), std::string("560.94"));
+    EXPECT_EQ(UmdVersionQuadString(v61664), std::string("32.0.16.1664"));
+    EXPECT_EQ(NvidiaDriverNumber(v61664), 61664u);
+    EXPECT_TRUE(NvidiaDriverNumber(v56094) < kMinNvidiaDriverForNr);
+    EXPECT_TRUE(NvidiaDriverNumber(v61664) >= kMinNvidiaDriverForNr);
+    EXPECT_TRUE(NvidiaDriverVersionString(0).empty());
+    EXPECT_TRUE(UmdVersionQuadString(0).empty());
 }
 
 static void Test_ParseArgsErrors() {
@@ -915,6 +958,9 @@ int main(int argc, char** argv) {
         {"ParseArgsDefaults", Test_ParseArgsDefaults, false},
         {"ParseArgsValues", Test_ParseArgsValues, false},
         {"ParseArgsErrors", Test_ParseArgsErrors, false},
+        {"ParseArgsNrPrime", Test_ParseArgsNrPrime, false},
+        {"DriverVersionString", Test_DriverVersionString, false},
+        {"ArchSpoofFlag", Test_ArchSpoofFlag, false},
         {"MetricsIdentity", Test_MetricsIdentity, false},
         {"MetricsKnownError", Test_MetricsKnownError, false},
         {"MetricsSizeMismatch", Test_MetricsSizeMismatch, false},

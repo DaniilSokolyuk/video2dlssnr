@@ -59,7 +59,7 @@ if not exist "!NGXLIB!" (
 set "COMMON=/nologo /std:c++17 /EHsc /W3 !OPT! /D_CRT_SECURE_NO_WARNINGS"
 set "INCLUDES=/I "%ROOT%third_party\nvngx\include" /I "%ROOT%third_party\stb" /I "%ROOT%third_party\nvof" /I "%ROOT%src" /I "%ROOT%forwarder""
 set "LIBS=d3d12.lib dxgi.lib d3dcompiler.lib dxguid.lib advapi32.lib user32.lib version.lib shell32.lib"
-set "SHARED=%ROOT%src\common.cpp %ROOT%src\image.cpp %ROOT%src\gpu.cpp %ROOT%src\dlss.cpp %ROOT%src\cli.cpp %ROOT%src\pipeline.cpp %ROOT%src\nr.cpp %ROOT%src\optflow.cpp %ROOT%src\optflow_nvof.cpp %ROOT%src\slprobe.cpp"
+set "SHARED=%ROOT%src\common.cpp %ROOT%src\image.cpp %ROOT%src\gpu.cpp %ROOT%src\dlss.cpp %ROOT%src\cli.cpp %ROOT%src\pipeline.cpp %ROOT%src\nr.cpp %ROOT%src\archspoof.cpp %ROOT%src\optflow.cpp %ROOT%src\optflow_nvof.cpp %ROOT%src\slprobe.cpp"
 
 echo Building video2dlssnr [%CFG%]...
 cl !COMMON! !INCLUDES! ^
@@ -90,7 +90,7 @@ if errorlevel 1 (
 )
 
 echo Building forwarder [nvngx.dll_dlssnr.dll]...
-cl !COMMON! /LD ^
+cl !COMMON! /LD /I "%ROOT%third_party\nvngx\include" ^
    /Fo"%ROOT%build\app\fwd_" ^
    /Fe"%ROOT%out\nvngx.dll_dlssnr.dll" ^
    "%ROOT%forwarder\nvngx_fwd.cpp" ^

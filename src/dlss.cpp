@@ -214,27 +214,61 @@ bool NgxSession::FindLoadedDlssModule(std::string* path, std::string* version) {
         if (path) *path = Widen2Narrow(w);
         if (version) {
             *version = "unknown";
-            DWORD dummy = 0;
-            const DWORD size = GetFileVersionInfoSizeW(w.c_str(), &dummy);
-            if (size) {
-                std::vector<uint8_t> buf(size);
-                if (GetFileVersionInfoW(w.c_str(), 0, size, buf.data())) {
-                    VS_FIXEDFILEINFO* ffi = nullptr;
-                    UINT len = 0;
-                    if (VerQueryValueW(buf.data(), L"\\", reinterpret_cast<void**>(&ffi), &len) &&
-                        ffi) {
-                        char v[64];
-                        snprintf(v, sizeof(v), "%u.%u.%u.%u", HIWORD(ffi->dwFileVersionMS),
-                                 LOWORD(ffi->dwFileVersionMS), HIWORD(ffi->dwFileVersionLS),
-                                 LOWORD(ffi->dwFileVersionLS));
-                        *version = v;
-                    }
-                }
-            }
+            std::string quad;
+            if (ReadFileVersion(w, &quad, nullptr) && !quad.empty()) *version = quad;
         }
         return true;
     }
     return false;
+}
+
+bool ReadFileVersion(const std::wstring& path, std::string* quad, std::string* fileVersionString) {
+    if (quad) quad->clear();
+    if (fileVersionString) fileVersionString->clear();
+    DWORD dummy = 0;
+    const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &dummy);
+    if (!size) return false;
+    std::vector<uint8_t> buf(size);
+    if (!GetFileVersionInfoW(path.c_str(), 0, size, buf.data())) return false;
+
+    VS_FIXEDFILEINFO* ffi = nullptr;
+    UINT len = 0;
+    if (VerQueryValueW(buf.data(), L"\\", reinterpret_cast<void**>(&ffi), &len) && ffi && quad) {
+        char v[64];
+        snprintf(v, sizeof(v), "%u.%u.%u.%u", HIWORD(ffi->dwFileVersionMS),
+                 LOWORD(ffi->dwFileVersionMS), HIWORD(ffi->dwFileVersionLS),
+                 LOWORD(ffi->dwFileVersionLS));
+        *quad = v;
+    }
+
+    if (fileVersionString) {
+        // The string table is per language/codepage; walk the translations the file declares,
+        // then fall back to the two most common ones.
+        struct LangCp {
+            WORD lang, cp;
+        };
+        std::vector<LangCp> tries;
+        LangCp* tr = nullptr;
+        UINT trLen = 0;
+        if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation",
+                           reinterpret_cast<void**>(&tr), &trLen) &&
+            tr) {
+            for (UINT i = 0; i < trLen / sizeof(LangCp); ++i) tries.push_back(tr[i]);
+        }
+        tries.push_back({0x0409, 0x04B0});
+        tries.push_back({0x0409, 0x04E4});
+        for (const LangCp& t : tries) {
+            wchar_t key[80];
+            swprintf_s(key, L"\\StringFileInfo\\%04x%04x\\FileVersion", t.lang, t.cp);
+            wchar_t* s = nullptr;
+            UINT sLen = 0;
+            if (VerQueryValueW(buf.data(), key, reinterpret_cast<void**>(&s), &sLen) && s && sLen) {
+                *fileVersionString = Widen2Narrow(std::wstring(s));
+                break;
+            }
+        }
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
