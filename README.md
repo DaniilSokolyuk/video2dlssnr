@@ -29,13 +29,7 @@ the video script and the ComfyUI nodes are thin Python wrappers around it.
 
 ## Requirements
 
-Barely anything: an NVIDIA RTX GPU (20, 30, 40 or 50 series) on **driver 616.56 or newer** (the
-tool checks and tells you if yours is older) and **Python 3**.
-
-The model only agrees to run on RTX 50 by itself. On RTX 20/30/40 the tool reports the GPU to the
-model as an RTX 50 inside its own process, which is enough because the model already carries the
-kernels for those generations. Nothing on disk is changed; `--nr-arch-spoof 0` turns it off. RTX 40
-is confirmed, RTX 20/30 are not yet.
+Barely anything: an NVIDIA RTX GPU on **driver 616.56 or newer** and **Python 3**.
 
 ## UI
 
