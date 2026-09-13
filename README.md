@@ -29,8 +29,13 @@ the video script and the ComfyUI nodes are thin Python wrappers around it.
 
 ## Requirements
 
-Barely anything: an NVIDIA RTX GPU on **driver 616.56 or newer** (the tool checks and tells you
-if yours is older) and **Python 3**.
+Barely anything: an NVIDIA RTX GPU (20, 30, 40 or 50 series) on **driver 616.56 or newer** (the
+tool checks and tells you if yours is older) and **Python 3**.
+
+The model only agrees to run on RTX 50 by itself. On RTX 20/30/40 the tool reports the GPU to the
+model as an RTX 50 inside its own process, which is enough because the model already carries the
+kernels for those generations. Nothing on disk is changed; `--nr-arch-spoof 0` turns it off. RTX 40
+is confirmed, RTX 20/30 are not yet.
 
 ## UI
 
@@ -294,6 +299,7 @@ Composition — how much of the model's output to keep (blended over the origina
 | `--probe-nr` | create the NR feature the way the tool does and report the driver, the `nvngx_dlssnr.dll` in use and where it stops; needs no image |
 | `--probe-core` | with `--probe-nr`: also try the routes through the driver's NGX core (diagnostic only) |
 | `--nr-prime <mode>` | `none` (default) / `sr` / `core`: what to warm up before the NR feature is built; leave at the default unless asked |
+| `--nr-arch-spoof <0\|1>` | report an RTX 20/30/40 GPU to the model as RTX 50 so it runs there (default 1; no effect on RTX 50) |
 | `--probe-sl` | drive Streamline and report whether it sees DLSS-NR as supported |
 | `--nr-in <WxH>` / `--nr-out <WxH>` | probe input / output size |
 | `--sl-feature <id>` | Streamline feature id to probe (default 1004 = DLSS-NR) |

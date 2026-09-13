@@ -10,6 +10,7 @@
 // CPU only:            video2dlssnr_tests.exe --no-gpu
 // One group:           video2dlssnr_tests.exe --filter Downsample
 
+#include "archspoof.h"
 #include "cli.h"
 #include "common.h"
 #include "dlss.h"
@@ -405,6 +406,18 @@ static void Test_ParseArgsNrPrime() {
     EXPECT_FALSE(ParseNrPrimeMode("", &m));
     EXPECT_TRUE(ParseNrPrimeMode("Sr", &m) && m == NrPrimeMode::Sr);
     EXPECT_EQ(std::string(NrPrimeModeName(NrPrimeMode::Core)), std::string("core"));
+}
+
+static void Test_ArchSpoofFlag() {
+    EXPECT_TRUE(ParseCli({"--in", "a.png"}).nrArchSpoof);
+    EXPECT_FALSE(ParseCli({"--in", "a.png", "--nr-arch-spoof", "0"}).nrArchSpoof);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-arch-spoof", "1"}).nrArchSpoof);
+    EXPECT_EQ(std::string(NvArchName(0x172)), std::string("Ampere"));
+    EXPECT_EQ(std::string(NvArchName(0x194)), std::string("Ada"));
+    EXPECT_EQ(std::string(NvArchName(0x1B0)), std::string("Blackwell"));
+    EXPECT_EQ(std::string(NvArchName(0x1A0)), std::string("Blackwell"));
+    EXPECT_EQ(std::string(NvArchName(0x160)), std::string("Turing"));
+    EXPECT_EQ(std::string(NvArchName(0)), std::string("unknown"));
 }
 
 static void Test_DriverVersionString() {
@@ -947,6 +960,7 @@ int main(int argc, char** argv) {
         {"ParseArgsErrors", Test_ParseArgsErrors, false},
         {"ParseArgsNrPrime", Test_ParseArgsNrPrime, false},
         {"DriverVersionString", Test_DriverVersionString, false},
+        {"ArchSpoofFlag", Test_ArchSpoofFlag, false},
         {"MetricsIdentity", Test_MetricsIdentity, false},
         {"MetricsKnownError", Test_MetricsKnownError, false},
         {"MetricsSizeMismatch", Test_MetricsSizeMismatch, false},

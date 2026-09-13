@@ -1,5 +1,7 @@
 #include "nr.h"
 
+#include "archspoof.h"
+
 #include "image.h"
 #include "nr_params.h"
 #include "optflow.h"
@@ -536,6 +538,7 @@ int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW
     const std::wstring dataPath = NgxDataPath();
     LogNrEnvironment(gpu, snippetPath, prime);
     CheckDriverForNr(gpu);  // reported, not enforced: the probe exists to show what happens
+    SetupArchSpoof();
 
     const std::vector<std::wstring> paths = DefaultDllSearchPaths(dllDir);
     for (const std::wstring& p : paths) LogDebug("dll search path: %s", Widen2Narrow(p).c_str());
@@ -1215,6 +1218,7 @@ int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string
     const std::wstring dataPath = NgxDataPath();
     LogNrEnvironment(gpu, snippetPath, prime);
     if (!CheckDriverForNr(gpu)) return 1;
+    SetupArchSpoof();
 
     NgxSession ngx;
     ngx.Init(gpu.Device(), DefaultDllSearchPaths(dllDir), verbose);
@@ -1519,6 +1523,7 @@ int RunNeuralRenderingVideo(const std::string& dllDir, int adapter, unsigned inW
     const std::wstring dataPath = NgxDataPath();
     LogNrEnvironment(gpu, snippetPath, prime);
     if (!CheckDriverForNr(gpu)) return 1;
+    SetupArchSpoof();
 
     NgxSession ngx;
     ngx.Init(gpu.Device(), DefaultDllSearchPaths(dllDir), verbose);

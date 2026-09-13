@@ -45,6 +45,7 @@ struct Options {
     float nrLocalTone = 1.0f;        // DLSSNR.LocalToneStrength
     float nrSkin = -1.0f;            // DLSSNR.SkinStructureStrength (<0 = model default)
     NrPrimeMode nrPrime = NrPrimeMode::None;  // --nr-prime: how the NGX backend is woken
+    bool nrArchSpoof = true;         // report a pre-Blackwell GPU to the model as Blackwell
     bool nrAutoMask = false;         // DLSSNR.UseAutoMask
     bool nrUiCorrection = true;      // DLSSNR.UICorrection
     // Composition of the model's output over the original (host-side).

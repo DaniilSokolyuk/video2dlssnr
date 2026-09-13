@@ -58,6 +58,8 @@ void PrintUsage() {
         "                       feature first and keep it alive), core (old behaviour: a core\n"
         "                       CreateFeature 18 first; crashes on driver 616.64+ - kept for\n"
         "                       A/B on 616.56)\n"
+        "  --nr-arch-spoof <0|1> Report an RTX 20/30/40 GPU to the model as Blackwell so it\n"
+        "                       agrees to run there (default: 1; does nothing on RTX 50)\n"
         "  --nr-in <WxH>        Probe input size (default: 1920x1080)\n"
         "  --nr-out <WxH>       Probe output size (default: 3840x2160)\n"
         "  --nr-preset <n>      DLSSNR render preset hint (default: 0)\n"
@@ -184,6 +186,8 @@ Options ParseArgs(int argc, char** argv, bool* wantHelp) {
             o.probeNr = true;
         } else if (a == "--probe-core") {
             o.probeCore = true;
+        } else if (a == "--nr-arch-spoof") {
+            o.nrArchSpoof = toInt(need(i, "--nr-arch-spoof"), "--nr-arch-spoof") != 0;
         } else if (a == "--nr-prime") {
             const std::string v = need(i, "--nr-prime");
             if (!ParseNrPrimeMode(v, &o.nrPrime)) throw ToolError("--nr-prime must be none, core or sr");

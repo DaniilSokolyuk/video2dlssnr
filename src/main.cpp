@@ -7,6 +7,7 @@
 // temporal reconstruction rather than a one-shot spatial upscale — which is what
 // makes preset differences visible.
 
+#include "archspoof.h"
 #include "cli.h"
 #include "common.h"
 #include "nr.h"
@@ -117,6 +118,7 @@ static int Run(int argc, char** argv) {
     // Default the DLL directory to the executable's own folder, so dropping nvngx_dlssnr.dll
     // next to video2dlssnr.exe works with no --dll-dir.
     if (o.dllDir.empty()) o.dllDir = ExeDir();
+    SetArchSpoofEnabled(o.nrArchSpoof);
 
     if (o.probeNr) {
         return ProbeNeuralRendering(o.dllDir, o.adapter, o.nrInW, o.nrInH, o.nrOutW,
