@@ -7,9 +7,11 @@
 // The model learns the architecture through NvAPI_GPU_GetArchInfo, resolved by id from
 // nvapi64.dll's single export nvapi_QueryInterface. This module answers that one query itself,
 // in this process only: the real answers for every GPU are cached first, the function's entry is
-// then redirected to a handler that returns the cached data with the architecture of any
-// pre-Blackwell NVIDIA card reported as Blackwell. Nothing on disk changes, and on a card the
-// model already accepts nothing is patched at all.
+// then redirected to a handler that returns the cached data - with the architecture of a
+// pre-Blackwell NVIDIA card reported as Blackwell when, and only when, the caller is
+// nvngx_dlssnr.dll. Every other caller (the driver's NGX core, DLSS Super Resolution) gets the
+// real card: told it was on Blackwell, DLSS SR takes the GPU down on Ampere. Nothing on disk
+// changes, and on a card the model already accepts nothing is patched at all.
 #pragma once
 
 #include "common.h"

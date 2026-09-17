@@ -1884,6 +1884,9 @@ int RunNeuralRenderingVideo(const std::string& dllDir, int adapter, unsigned inW
             std::fflush(stderr);
         }
     }
+    // An early exit (a failed evaluate) leaves the reader blocked on a full queue; closing it
+    // lets the thread finish instead of the join hanging the process - and with it the UI.
+    qIn.close();
     qOut.close();
     reader.join();
     writer.join();

@@ -2,7 +2,10 @@
 
 #include <windows.h>
 
+#include <intrin.h>
+
 #include <cstring>
+#include <mutex>
 
 namespace {
 
@@ -45,10 +48,48 @@ bool NeedsSpoof(unsigned arch) {
     return g == kArchTuring || g == kArchAmpere || g == kArchAda;
 }
 
+// The one module that is lied to. The hook resolves its caller from the return address; every
+// other NGX component asking the same question is answered truthfully.
+constexpr wchar_t kModelDll[] = L"nvngx_dlssnr.dll";
+
+struct CallerVerdict {
+    HMODULE module;
+    bool spoof;
+};
+constexpr int kMaxCallers = 16;
+CallerVerdict g_callers[kMaxCallers];
+int g_callerCount = 0;
+std::mutex g_callerLock;
+
+bool CallerIsModel(void* returnAddress) {
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(returnAddress), &m) ||
+        !m) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_callerLock);
+    for (int i = 0; i < g_callerCount; ++i) {
+        if (g_callers[i].module == m) return g_callers[i].spoof;
+    }
+    wchar_t path[MAX_PATH]{};
+    GetModuleFileNameW(m, path, MAX_PATH);
+    const wchar_t* base = wcsrchr(path, L'\\');
+    base = base ? base + 1 : path;
+    const bool spoof = _wcsicmp(base, kModelDll) == 0;
+    if (g_callerCount < kMaxCallers) g_callers[g_callerCount++] = {m, spoof};
+    LogDebug("architecture asked by %s: %s", Widen2Narrow(path).c_str(),
+             spoof ? "told Blackwell" : "told the real card");
+    return spoof;
+}
+
 // Replaces NvAPI_GPU_GetArchInfo for the whole process. Answers from the cache taken before the
 // redirect went in; an unknown handle gets the first card's answer, which is the same GPU reached
 // through another API path in every case seen. The structure version the caller asked for is kept.
+// Only nvngx_dlssnr.dll is told Blackwell; see CallerIsModel.
 int __cdecl ArchInfoHook(void* gpu, NvArchInfo* info) {
+    void* const caller = _ReturnAddress();
     if (!info) return -1;  // NVAPI_ERROR
     const unsigned want = info->version;
     int idx = 0;
@@ -60,7 +101,7 @@ int __cdecl ArchInfoHook(void* gpu, NvArchInfo* info) {
     }
     *info = g_cache[idx];
     info->version = want;
-    if (NeedsSpoof(info->architecture)) {
+    if (NeedsSpoof(info->architecture) && CallerIsModel(caller)) {
         // Implementation and revision as a live GB2XX board reports them; the check may read
         // more than the group.
         info->architecture = kArchBlackwell;
@@ -160,7 +201,8 @@ ArchSpoofResult SetupArchSpoof() {
 
     if (!Redirect(reinterpret_cast<void*>(getArch), reinterpret_cast<void*>(&ArchInfoHook)))
         return fail("could not make the NvAPI entry writable");
-    LogInfo("  arch:   0x%X (%s) reported to the model as 0x%X (%s); %d card(s) cached",
+    LogInfo("  arch:   0x%X (%s); reported to the NR model as 0x%X (%s), the real card to "
+            "everything else; %d card(s) cached",
             g_cache[0].architecture, NvArchName(g_cache[0].architecture), kArchBlackwell,
             NvArchName(kArchBlackwell), g_count);
     return g_result = ArchSpoofResult::Installed;
