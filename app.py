@@ -27,7 +27,7 @@ _ensure("gradio")
 import gradio as gr
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from nr_video import find_tool  # noqa: E402  (same ffmpeg lookup as the video script)
+from nr_video import find_tool, probe, HDR_TRANSFERS  # noqa: E402  (shared with the video script)
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 EXE = os.path.join(ROOT, "out", "video2dlssnr.exe")
@@ -90,21 +90,27 @@ QUALITIES = {  # constant-quality targets (lower = better); "Custom" opens the C
     "Custom": None,
 }
 AUDIO = ["auto", "copy", "aac", "opus", "flac", "none"]
+# How the source is coded (nr_video.py --nr-transfer). Auto reads the clip's colour tags: PQ / HLG
+# clips take the HDR path (16-bit pipe, SDR proxy for the model, linear-light residual back), the
+# rest are SDR. The other entries override the tags for a mistagged file.
+HDR_SOURCES = {
+    "Auto (from the clip's tags)": "auto",
+    "Treat as SDR": "srgb",
+    "HDR10 / PQ": "pq",
+    "HLG": "hlg",
+}
 PRORES_PROFILES = ["proxy", "lt", "standard", "hq", "4444", "4444xq"]
 
 
-def nr_model_args(style, preset, intensity, local_structure, local_tone, skin, global_tone,
-                  detail, color, ui_correction, auto_mask, hdr):
+def nr_model_args(style, preset, intensity, local_structure, local_tone, skin,
+                  detail, color, ui_correction, auto_mask):
     """The NR model + composite flags shared by both tabs (same names as the CLI)."""
     a = ["--nr-style", str(STYLES[style]), "--nr-preset", str(PRESETS[preset]),
          "--nr-intensity", str(intensity), "--nr-local-structure", str(local_structure),
-         "--nr-local-tone", str(local_tone), "--nr-skin", str(skin),
-         "--nr-global-tone", str(global_tone), "--nr-detail", str(detail),
+         "--nr-local-tone", str(local_tone), "--nr-skin", str(skin), "--nr-detail", str(detail),
          "--nr-color", str(color), "--nr-ui-correction", "1" if ui_correction else "0"]
     if auto_mask:
         a += ["--nr-auto-mask"]
-    if hdr:
-        a += ["--nr-hdr"]
     return a
 
 
@@ -154,14 +160,13 @@ def size_args_video(size, width, height, scale):
 
 
 def run_image(image, size, width, height, scale, sr_preset, style, preset, intensity,
-              local_structure, local_tone, skin, global_tone, detail, color, ui_correction,
-              auto_mask, hdr):
+              local_structure, local_tone, skin, detail, color, ui_correction, auto_mask):
     if not image:
         return None, "Drop an image first."
     os.makedirs(OUT_DIR, exist_ok=True)
     args = [EXE, "--nr-run", "--in", image, "--out", OUT_DIR, "--nr-sr-preset", SR_PRESETS[sr_preset]]
     args += nr_model_args(style, preset, intensity, local_structure, local_tone, skin,
-                          global_tone, detail, color, ui_correction, auto_mask, hdr)
+                          detail, color, ui_correction, auto_mask)
     args += size_args_image(image, size, width, height, scale)
     before = set(glob.glob(os.path.join(OUT_DIR, "*_nr.png")))
     p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -184,13 +189,23 @@ BROWSER_PLAYABLE = {("mp4", "h264_nvenc"), ("mp4", "av1_nvenc"), ("mp4", "av1_sv
 
 
 def make_preview(out):
-    """A quick 8-bit H.264 copy (<=1080p) next to the result, for the browser only."""
-    ffmpeg = find_tool("ffmpeg")
+    """A quick 8-bit H.264 copy (<=1080p) next to the result, for the browser only.
+
+    An HDR result (PQ / HLG) is tone-mapped to SDR bt709 first; shown raw, PQ code values read as
+    a washed-out, overexposed picture on an SDR page, which is not what the file contains."""
+    ffmpeg, ffprobe = find_tool("ffmpeg"), find_tool("ffprobe")
     if not ffmpeg:
         return None
     prev = os.path.splitext(out)[0] + "_preview.mp4"
-    common = [ffmpeg, "-y", "-v", "error", "-i", out, "-map", "0:v:0", "-map", "0:a:0?",
-              "-vf", "scale='min(1920,iw)':-2:flags=bicubic,format=yuv420p"]
+    vf = "scale='min(1920,iw)':-2:flags=bicubic"
+    trc = probe(ffprobe, out)["trc"] if ffprobe else ""
+    if trc in HDR_TRANSFERS:
+        vf += (",zscale=t=linear:npl=203,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,"
+               "zscale=t=bt709:m=bt709:r=tv")
+    vf += ",format=yuv420p"
+    if trc in HDR_TRANSFERS:
+        vf += ",setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
+    common = [ffmpeg, "-y", "-v", "error", "-i", out, "-map", "0:v:0", "-map", "0:a:0?", "-vf", vf]
     tail = ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", prev]
     for venc in (["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "24", "-b:v", "0"],
                  ["-c:v", "libopenh264", "-b:v", "8M"]):
@@ -217,9 +232,9 @@ def _stream(proc):
 
 
 def run_video(video, engine, motion, motion_vis, size, width, height, scale, sr_preset, style,
-              preset, intensity, local_structure, local_tone, skin, global_tone, detail, color,
-              ui_correction, auto_mask, hdr, codec_label, container, quality, cq, bitrate,
-              bit_depth, enc_preset, prores_profile, audio, frames):
+              preset, intensity, local_structure, local_tone, skin, detail, color,
+              ui_correction, auto_mask, codec_label, container, quality, cq, bitrate,
+              bit_depth, enc_preset, prores_profile, audio, frames, hdr_source, sdr_white):
     if not video:
         yield None, None, "Drop a video first."
         return
@@ -240,8 +255,12 @@ def run_video(video, engine, motion, motion_vis, size, width, height, scale, sr_
     else:
         args += ["--cq", str(int(cq)), "--bitrate", str(int(bitrate))]
     args += nr_model_args(style, preset, intensity, local_structure, local_tone, skin,
-                          global_tone, detail, color, ui_correction, auto_mask, hdr)
+                          detail, color, ui_correction, auto_mask)
     args += size_args_video(size, width, height, scale)
+    if HDR_SOURCES[hdr_source] != "auto":
+        args += ["--nr-transfer", HDR_SOURCES[hdr_source]]
+    if float(sdr_white or 0) > 0:
+        args += ["--nr-sdr-white", str(float(sdr_white))]
     if motion_vis:
         args += ["--nr-motion-vis"]
     if int(frames) > 0:
@@ -277,16 +296,14 @@ def nr_controls():
         local_tone = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="Local tone")
     with gr.Row():
         skin = gr.Slider(-1.0, 2.0, value=-1.0, step=0.05, label="Skin (-1 = model default)")
-        global_tone = gr.Slider(-1.0, 2.0, value=-1.0, step=0.05, label="Global tone (<0 = default)")
     with gr.Row():
         detail = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="Composite detail (0=original)")
         color = gr.Slider(0.0, 1.0, value=1.0, step=0.05, label="Composite colour")
     with gr.Row():
         ui_correction = gr.Checkbox(value=False, label="UI correction")
         auto_mask = gr.Checkbox(value=False, label="Auto mask")
-        hdr = gr.Checkbox(value=False, label="HDR (linear)")
-    return [style, preset, intensity, local_structure, local_tone, skin, global_tone, detail,
-            color, ui_correction, auto_mask, hdr]
+    return [style, preset, intensity, local_structure, local_tone, skin, detail,
+            color, ui_correction, auto_mask]
 
 
 def size_controls(default):
@@ -366,6 +383,19 @@ with gr.Blocks(title="video2dlssnr") as demo:
                                                    label="ProRes profile", visible=False)
                             v_audio = gr.Dropdown(AUDIO, value="auto", label="Audio")
                             v_frames = gr.Number(value=0, precision=0, label="Frame cap (0 = all)")
+                    with gr.Accordion("HDR", open=False):
+                        gr.Markdown("HDR10 / PQ and HLG clips are recognised from their tags and "
+                                    "handled automatically: the model works on an SDR proxy and its "
+                                    "edit goes back onto the HDR frame, so brightness and highlights "
+                                    "stay as they were. Override the source type only for a "
+                                    "mistagged file.")
+                        with gr.Row():
+                            v_hdr_source = gr.Dropdown(list(HDR_SOURCES), value=list(HDR_SOURCES)[0],
+                                                       label="HDR source")
+                            v_sdr_white = gr.Number(
+                                value=203, precision=0,
+                                label="SDR white (nits) - the PQ level the model is shown as white; "
+                                      "203 = BT.2408, lower = brighter proxy")
                     v_btn = gr.Button("Run", variant="primary")
                 with gr.Column():
                     vid_out = gr.Video(label="Preview (a browser copy when the format needs one)")
@@ -385,7 +415,7 @@ with gr.Blocks(title="video2dlssnr") as demo:
             v_btn.click(run_video,
                         inputs=[vid_in, v_engine, v_motion, v_vis] + v_size + v_nr
                         + [v_codec, v_container, v_quality, v_cq, v_bitrate, v_depth, v_enc,
-                           v_prores, v_audio, v_frames],
+                           v_prores, v_audio, v_frames, v_hdr_source, v_sdr_white],
                         outputs=[vid_out, v_file, v_log])
 
 

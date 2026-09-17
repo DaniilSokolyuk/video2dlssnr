@@ -3,6 +3,7 @@
 This is the one entry point for video - it drives the optimised, fully-on-GPU flow:
 
     ffmpeg (decode) --raw rgba--> video2dlssnr --nr-video --raw rgba--> ffmpeg (encode + audio)
+                       (rgba64le both ways for HDR sources)
 
 The heavy work (upscale, sRGB encode, neural rendering, composite, 8-bit pack) all happens on
 the GPU inside video2dlssnr; nothing is shuttled back to the CPU between DLSS and NR. ffmpeg only
@@ -15,6 +16,11 @@ Output quality is constant-quality by default (--cq 19, 10-bit HEVC, colour tagg
 encoder is never the weak link: the old fixed ~2 Mbit/s NVENC default made every 4K result blocky.
 The container comes from the --out extension (.mp4 / .mkv / .mov / .webm), the codec from --codec.
 The NR / scale flags are named exactly like video2dlssnr.exe (--nr-*).
+
+HDR (PQ / HLG) sources are detected from their colour tags and take the HDR path automatically:
+frames travel as 16-bit RGBA, the tool linearises them, shows the model an SDR proxy and puts the
+model's edit back on the HDR frame as a linear-light residual (see --nr-transfer in the tool). The
+output keeps the source's transfer and primaries and is always 10-bit.
 """
 
 import argparse
@@ -127,6 +133,17 @@ def colour_tags(src):
     return m, p, t
 
 
+# ffprobe color_transfer -> the tool's --nr-transfer. Anything else is SDR (sRGB / bt709 gamma).
+HDR_TRANSFERS = {"smpte2084": "pq", "arib-std-b67": "hlg"}
+
+
+def hdr_transfer(src, forced="auto"):
+    """'pq' / 'hlg' when the clip is HDR (or forced), else None."""
+    if forced != "auto":
+        return None if forced == "srgb" else forced
+    return HDR_TRANSFERS.get(src["trc"])
+
+
 def even(v):
     v = int(round(v))
     return max(2, v - v % 2)
@@ -193,10 +210,17 @@ def audio_args(src, ext, mode, kbps):
     sys.exit(f"unknown --audio {mode!r}")
 
 
-def video_args(codec, args, outW, outH, tags):
+def video_args(codec, args, outW, outH, tags, hdr=False):
     """Encoder flags + the pixel format the filter chain must deliver."""
     enc, family = CODECS[codec]
     ten = args.bit_depth == 10
+    if hdr and not ten:
+        print("HDR output is always 10-bit (8-bit PQ / HLG bands badly); encoding 10-bit",
+              file=sys.stderr)
+        ten = True
+    if hdr and enc == "h264_nvenc":
+        sys.exit("h264_nvenc is 8-bit only and cannot carry HDR; use --codec hevc_nvenc, av1_nvenc "
+                 "or av1_svt")
     matrix, primaries, trc = tags
     colour = ["-colorspace", matrix, "-color_primaries", primaries, "-color_trc", trc,
               "-color_range", "tv"]
@@ -316,10 +340,14 @@ def build_parser():
     g.add_argument("--nr-local-structure", type=float, default=1.0, help="DLSSNR.LocalStructureStrength (0-2)")
     g.add_argument("--nr-local-tone", type=float, default=1.0, help="DLSSNR.LocalToneStrength (0-2)")
     g.add_argument("--nr-skin", type=float, default=-1.0, help="DLSSNR.SkinStructureStrength (-1 = model default)")
-    g.add_argument("--nr-global-tone", type=float, default=-1.0, help="DLSSNR.GlobalToneStrength (<0 = model default)")
     g.add_argument("--nr-detail", type=float, default=1.0, help="composite strength (0 = original, 1 = full NR)")
     g.add_argument("--nr-color", type=float, default=1.0, help="0 = keep original hue, 1 = NR colour")
-    g.add_argument("--nr-hdr", action="store_true", help="feed linear (HDR) instead of the sRGB proxy")
+    g.add_argument("--nr-transfer", choices=["auto", "srgb", "pq", "hlg"], default="auto",
+                   help="how the source is coded: auto (default, from the clip's colour tags), or "
+                        "force srgb (treat as SDR) / pq (HDR10) / hlg for a clip whose tags are wrong")
+    g.add_argument("--nr-sdr-white", type=float, default=203.0,
+                   help="HDR (PQ): the luminance in nits shown to the model as SDR white (default 203, "
+                        "BT.2408 graphics white; 100 makes the proxy brighter, 300 darker)")
     g.add_argument("--nr-ui-correction", type=int, default=0, help="DLSSNR.UICorrection (0/1)")
     g.add_argument("--nr-auto-mask", action="store_true", help="enable DLSSNR.UseAutoMask")
     g.add_argument("--nr-motion", type=int, default=1, help="optical-flow motion vectors for NR (0/1)")
@@ -374,10 +402,18 @@ def main():
     outW, outH = output_size(src, args.nr_width, args.nr_height, args.nr_scale, args.nr_fit)
     toolW, toolH = tool_size(src, outW, outH)
     tags = colour_tags(src)
-    hdr_in = src["trc"] in ("smpte2084", "arib-std-b67")
-    if hdr_in:
-        print(f"HDR source ({src['trc']}): colour tags carried through; NR runs on the PQ/HLG-coded "
-              f"signal", file=sys.stderr)
+    transfer = hdr_transfer(src, args.nr_transfer)  # 'pq' / 'hlg' for HDR, None for SDR
+    if transfer == "hlg" and tags[2] == "bt709":  # forced HLG on an untagged clip: tag the output so
+        tags = (tags[0], "bt2020", "arib-std-b67")
+    elif transfer == "pq" and tags[2] == "bt709":
+        tags = (tags[0], "bt2020", "smpte2084")
+    if transfer:
+        white = (f"SDR white {args.nr_sdr_white:g} nits" if transfer == "pq"
+                 else "reference white at signal 0.75")
+        print(f"HDR source ({transfer.upper()}, {src['trc']}): 16-bit pipe; the model sees an SDR proxy "
+              f"({white}), its edit comes back as a linear-light residual; tags carried through",
+              file=sys.stderr)
+    pipe_fmt = "rgba64le" if transfer else "rgba"
 
     upscale = (toolW, toolH) != (inW, inH)
 
@@ -397,7 +433,7 @@ def main():
                           ("color_trc", tags[2], src["trc"])):
         if cur == "unknown":
             setp.append(f"{key}={val}")
-    vf = ([f"setparams={':'.join(setp)}"] if setp else []) + [f"scale=flags={SWS}", "format=rgba"]
+    vf = ([f"setparams={':'.join(setp)}"] if setp else []) + [f"scale=flags={SWS}", f"format={pipe_fmt}"]
     dec = [ffmpeg, "-v", "error", "-i", args.inp]
     if args.frames:
         dec += ["-frames:v", str(args.frames)]
@@ -409,12 +445,12 @@ def main():
             "--nr-intensity", str(args.nr_intensity),
             "--nr-local-structure", str(args.nr_local_structure),
             "--nr-local-tone", str(args.nr_local_tone), "--nr-skin", str(args.nr_skin),
-            "--nr-global-tone", str(args.nr_global_tone), "--nr-detail", str(args.nr_detail),
+            "--nr-detail", str(args.nr_detail),
             "--nr-color", str(args.nr_color), "--nr-ui-correction", str(args.nr_ui_correction),
             "--nr-motion", str(args.nr_motion), "--nr-motion-engine", args.nr_motion_engine,
             "--nr-sr-preset", args.nr_sr_preset]
-    if args.nr_hdr:
-        tool += ["--nr-hdr"]
+    if transfer:
+        tool += ["--nr-transfer", transfer, "--nr-sdr-white", f"{args.nr_sdr_white:g}"]
     if args.nr_auto_mask:
         tool += ["--nr-auto-mask"]
     if args.nr_motion_vis:
@@ -427,7 +463,7 @@ def main():
         tool += ["--adapter", str(args.adapter)]
 
     # ---- encode: RGB -> YUV with the right matrix and full-chroma resampling, then the codec.
-    vargs, pix = video_args(codec, args, outW, outH, tags)
+    vargs, pix = video_args(codec, args, outW, outH, tags, hdr=bool(transfer))
     evf = []
     if (toolW, toolH) != (outW, outH):
         evf.append(f"scale={outW}:{outH}:flags={SWS}")
@@ -441,7 +477,7 @@ def main():
                    ":range=tv")
     else:  # RGB output: no Y'CbCr matrix to signal, full range
         evf.append(f"setparams=color_primaries={tags[1]}:color_trc={tags[2]}:range=pc")
-    enc = [ffmpeg, "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgba",
+    enc = [ffmpeg, "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", pipe_fmt,
            "-s", f"{toolW}x{toolH}", "-r", src["rate"], "-i", "-",
            "-i", args.inp, "-map", "0:v:0"]
     enc += audio_args(src, ext, args.audio, args.audio_bitrate)

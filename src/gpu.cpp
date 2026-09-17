@@ -145,29 +145,41 @@ bool ParseDownFilter(const std::string& s, DownFilter* out) {
 // so the only CPU touch is the single uint8 readback the encoder pipe needs.
 // ---------------------------------------------------------------------------
 static const char* kEncodeHlsl = R"HLSL(
-cbuffer C : register(b0) { uint2 gSize; uint2 gPad; };
-Texture2D<float4>   gSrc : register(t0);   // linear
+cbuffer C : register(b0) { uint2 gSize; float gDetail; float gColour; uint gMode; float gWhite; float gMaxOut; float gPad; };
+Texture2D<float4>   gSrc : register(t0);   // linear: SDR 0..1, or HDR with 1.0 = SDR white
 Texture2D<float4>   gAux : register(t1);   // unused here
-RWTexture2D<float4> gDst : register(u0);   // sRGB
+RWTexture2D<float4> gDst : register(u0);
 float3 LinToSrgb(float3 c) {
     c = max(c, 0.0f);
     float3 lo = c * 12.92f;
     float3 hi = 1.055f * pow(max(c, 1e-8f), 1.0f / 2.4f) - 0.055f;
     return lerp(hi, lo, step(c, 0.0031308f));
 }
+// The HDR proxy the model is shown: light divided by (1 + P), P the pixel's brightest channel.
+// Unity gain in the dark, a soft roll-off through the highlights, never above 1.0; SDR white
+// lands at 0.5. Per pixel and invertible, so the composite can undo it exactly.
+float3 HdrProxyLinear(float3 c) {
+    c = max(c, 0.0f);
+    float P = max(c.r, max(c.g, c.b));
+    return c / (1.0f + P);
+}
 [numthreads(8, 8, 1)]
 void CSMain(uint3 t : SV_DispatchThreadID) {
     if (t.x >= gSize.x || t.y >= gSize.y) return;
     float4 c = gSrc[t.xy];
-    gDst[t.xy] = float4(LinToSrgb(c.rgb), c.a);
+    float3 o;
+    if (gMode == 0)      o = LinToSrgb(c.rgb);                  // SDR: sRGB for the model
+    else if (gMode == 1) o = LinToSrgb(HdrProxyLinear(c.rgb)); // HDR: the model's sRGB proxy
+    else                 o = HdrProxyLinear(c.rgb);            // HDR: linear proxy (flow input)
+    gDst[t.xy] = float4(o, c.a);
 }
 )HLSL";
 
 static const char* kCompositeHlsl = R"HLSL(
-cbuffer C : register(b0) { uint2 gSize; float gDetail; float gColour; };
-Texture2D<float4>   gOrig : register(t0);  // linear upscaled original
-Texture2D<float4>   gNr   : register(t1);  // sRGB model output
-RWTexture2D<float4> gDst  : register(u0);  // R8G8B8A8_UNORM (sRGB-encoded)
+cbuffer C : register(b0) { uint2 gSize; float gDetail; float gColour; uint gMode; float gWhite; float gMaxOut; float gPad; };
+Texture2D<float4>   gOrig : register(t0);  // linear original: SDR 0..1, or HDR with 1.0 = SDR white
+Texture2D<float4>   gNr   : register(t1);  // model output, sRGB
+RWTexture2D<float4> gDst  : register(u0);  // UNORM 8/16-bit: sRGB-coded (SDR) or PQ / HLG-coded (HDR)
 float3 SrgbToLin(float3 c) {
     c = max(c, 0.0f);
     float3 lo = c / 12.92f;
@@ -181,24 +193,56 @@ float3 LinToSrgb(float3 c) {
     return lerp(hi, lo, step(c, 0.0031308f));
 }
 float Luma(float3 c) { return dot(c, float3(0.2126f, 0.7152f, 0.0722f)); }
+// SMPTE ST 2084 (PQ) inverse EOTF: L in units of 10000 nits -> signal 0..1.
+float3 PqOetf(float3 L) {
+    const float m1 = 0.1593017578125f, m2 = 78.84375f;
+    const float c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
+    float3 Lm = pow(max(L, 0.0f), m1);
+    return pow((c1 + c2 * Lm) / (1.0f + c3 * Lm), m2);
+}
+// ARIB STD-B67 (HLG) OETF: scene-linear E in 0..1 -> signal 0..1.
+float3 HlgOetf(float3 E) {
+    const float a = 0.17883277f, b = 0.28466892f, c = 0.55991073f;
+    E = max(E, 0.0f);
+    float3 lo = sqrt(3.0f * E);
+    float3 hi = a * log(max(12.0f * E - b, 1e-6f)) + c;
+    return lerp(hi, lo, step(E, 1.0f / 12.0f));
+}
 [numthreads(8, 8, 1)]
 void CSMain(uint3 t : SV_DispatchThreadID) {
     if (t.x >= gSize.x || t.y >= gSize.y) return;
     float4 o = gOrig[t.xy];                 // linear
-    float3 nr = SrgbToLin(gNr[t.xy].rgb);   // model output -> linear
-    float lo = Luma(o.rgb), ln = Luma(nr);
-    float scale = ln / max(lo, 1e-4f);
-    float3 loC = o.rgb * scale;             // original hue at model luminance
-    float3 cC = loC + (nr - loC) * gColour; // blend toward model colour
-    float3 res = o.rgb + (cC - o.rgb) * gDetail;  // overall strength, in linear
-    gDst[t.xy] = float4(saturate(LinToSrgb(res)), saturate(o.a));
+    if (gMode == 0) {
+        float3 nr = SrgbToLin(gNr[t.xy].rgb);   // model output -> linear
+        float lo = Luma(o.rgb), ln = Luma(nr);
+        float scale = ln / max(lo, 1e-4f);
+        float3 loC = o.rgb * scale;             // original hue at model luminance
+        float3 cC = loC + (nr - loC) * gColour; // blend toward model colour
+        float3 res = o.rgb + (cC - o.rgb) * gDetail;  // overall strength, in linear
+        gDst[t.xy] = float4(saturate(LinToSrgb(res)), saturate(o.a));
+        return;
+    }
+    // HDR. The model edited an SDR proxy of this pixel (see the encode pass); the edit comes
+    // back as a bounded linear-light residual on the original, scaled by the proxy's own gain,
+    // so an unchanged proxy leaves the pixel exactly as it was and the highlights stay HDR.
+    float3 C = max(o.rgb, 0.0f);
+    float P = max(C.r, max(C.g, C.b));
+    float3 I = C / (1.0f + P);                  // what the model was shown, linear
+    float3 O = SrgbToLin(gNr[t.xy].rgb);        // what it returned, linear
+    float lI = Luma(I), lO = Luma(O);
+    float3 dHue = I * (lO / max(lI, 1e-4f) - 1.0f);   // luminance change only, original hue
+    float3 dFull = O - I;                             // the model's colour too
+    float3 delta = clamp(lerp(dHue, dFull, gColour), -0.25f, 0.25f) * gDetail;
+    float3 hdr = clamp(C + (1.0f + P) * delta, 0.0f, gMaxOut);
+    float3 code = (gMode == 1) ? PqOetf(hdr * gWhite) : HlgOetf(hdr * gWhite);
+    gDst[t.xy] = float4(saturate(code), 1.0f);
 }
 )HLSL";
 
 // Debug: colour-code a motion-vector field (hue = direction, brightness = magnitude), the
 // standard optical-flow visualisation, so a --nr-motion-vis pass can show what the flow found.
 static const char* kFlowVisHlsl = R"HLSL(
-cbuffer C : register(b0) { uint2 gSize; float gMaxMag; float gPad; };
+cbuffer C : register(b0) { uint2 gSize; float gMaxMag; float gColour; uint gMode; float gWhite; float gMaxOut; float gPad; };
 Texture2D<float2>   gMotion : register(t0);
 Texture2D<float2>   gAux    : register(t1);
 RWTexture2D<float4> gDst    : register(u0);
@@ -218,10 +262,14 @@ void CSMain(uint3 t : SV_DispatchThreadID) {
 
 struct PostConstants {
     uint32_t size[2];
-    float detail;
+    float detail;   // composite strength (flow-vis: max magnitude)
     float colour;
+    uint32_t mode;  // EncodeMode / CompositeMode
+    float white;    // HDR: linear value that maps to transfer code 1.0
+    float maxOut;   // HDR: clamp for the residual result, same units
+    float pad;
 };
-static_assert(sizeof(PostConstants) == 16, "post constants are 4 x 32-bit");
+static_assert(sizeof(PostConstants) == 32, "post constants are 8 x 32-bit");
 
 // ---------------------------------------------------------------------------
 
@@ -261,9 +309,17 @@ void GpuContext::Initialize(bool enableDebugLayer, int adapterIndex) {
         chosen = adapter;
         m_adapterName = Widen2Narrow(desc.Description);
         m_vramMB = desc.DedicatedVideoMemory / (1024 * 1024);
+        m_vendorId = desc.VendorId;
         break;
     }
     if (!chosen) throw ToolError("no Direct3D 12 capable adapter found");
+    m_adapter = chosen;
+    {
+        LARGE_INTEGER umd{};
+        if (SUCCEEDED(chosen->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd))) {
+            m_umdVersion = static_cast<uint64_t>(umd.QuadPart);
+        }
+    }
 
     CHECK_HR(D3D12CreateDevice(chosen.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device)));
 
@@ -336,7 +392,32 @@ void GpuContext::Shutdown() {
     m_alloc.Reset();
     m_queue.Reset();
     m_device.Reset();
+    m_adapter.Reset();
     m_factory.Reset();
+}
+
+std::string UmdVersionQuadString(uint64_t umd) {
+    if (umd == 0) return {};
+    char b[48];
+    snprintf(b, sizeof(b), "%u.%u.%u.%u", static_cast<unsigned>((umd >> 48) & 0xFFFF),
+             static_cast<unsigned>((umd >> 32) & 0xFFFF), static_cast<unsigned>((umd >> 16) & 0xFFFF),
+             static_cast<unsigned>(umd & 0xFFFF));
+    return b;
+}
+
+unsigned NvidiaDriverNumber(uint64_t umd) {
+    if (umd == 0) return 0;
+    const unsigned f3 = static_cast<unsigned>((umd >> 16) & 0xFFFF);
+    const unsigned f4 = static_cast<unsigned>(umd & 0xFFFF);
+    return (f3 % 10u) * 10000u + f4;  // 16,1664 -> 61664
+}
+
+std::string NvidiaDriverVersionString(uint64_t umd) {
+    const unsigned v = NvidiaDriverNumber(umd);
+    if (v == 0) return {};
+    char b[32];
+    snprintf(b, sizeof(b), "%u.%02u", v / 100u, v % 100u);
+    return b;
 }
 
 void GpuContext::CreateDownsamplePipeline() {
@@ -497,21 +578,26 @@ void GpuContext::RecordPostPass(ID3D12PipelineState* pso, const GpuTexture& srv0
     m_list->Dispatch(static_cast<UINT>((uav.w + 7) / 8), static_cast<UINT>((uav.h + 7) / 8), 1);
 }
 
-void GpuContext::RecordEncodeSrgb(GpuTexture& srcLinear, GpuTexture& dstSrgb) {
+void GpuContext::RecordEncode(GpuTexture& srcLinear, GpuTexture& dst, EncodeMode mode) {
     PostConstants c{};
-    c.size[0] = static_cast<uint32_t>(dstSrgb.w);
-    c.size[1] = static_cast<uint32_t>(dstSrgb.h);
-    RecordPostPass(m_psoEncode.Get(), srcLinear, srcLinear, dstSrgb, c);
+    c.size[0] = static_cast<uint32_t>(dst.w);
+    c.size[1] = static_cast<uint32_t>(dst.h);
+    c.mode = static_cast<uint32_t>(mode);
+    RecordPostPass(m_psoEncode.Get(), srcLinear, srcLinear, dst, c);
 }
 
-void GpuContext::RecordComposite(GpuTexture& origLinear, GpuTexture& nrSrgb, GpuTexture& dstU8,
-                                 float detail, float colour) {
+void GpuContext::RecordComposite(GpuTexture& origLinear, GpuTexture& nr, GpuTexture& dst,
+                                 float detail, float colour, CompositeMode mode, float white,
+                                 float maxOut) {
     PostConstants c{};
-    c.size[0] = static_cast<uint32_t>(dstU8.w);
-    c.size[1] = static_cast<uint32_t>(dstU8.h);
+    c.size[0] = static_cast<uint32_t>(dst.w);
+    c.size[1] = static_cast<uint32_t>(dst.h);
     c.detail = detail;
     c.colour = colour;
-    RecordPostPass(m_psoComposite.Get(), origLinear, nrSrgb, dstU8, c);
+    c.mode = static_cast<uint32_t>(mode);
+    c.white = white;
+    c.maxOut = maxOut;
+    RecordPostPass(m_psoComposite.Get(), origLinear, nr, dst, c);
 }
 
 void GpuContext::RecordFlowVis(GpuTexture& motion, GpuTexture& dstU8, float maxMag) {
@@ -850,6 +936,20 @@ std::vector<float> GpuContext::ReadbackRg16Float(GpuTexture& tex) {
             bytes.data() + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch);
         float* dst = out.data() + static_cast<size_t>(y) * tex.w * 2;
         for (int i = 0; i < tex.w * 2; ++i) dst[i] = XMConvertHalfToFloat(src[i]);
+    }
+    return out;
+}
+
+std::vector<uint8_t> GpuContext::ReadbackRgba16(GpuTexture& tex) {
+    CHECK(tex.fmt == DXGI_FORMAT_R16G16B16A16_UNORM);
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    const std::vector<uint8_t> bytes = ReadbackBytes(tex, &fp);
+
+    std::vector<uint8_t> out(static_cast<size_t>(tex.w) * tex.h * 8);
+    for (int y = 0; y < tex.h; ++y) {
+        memcpy(out.data() + static_cast<size_t>(y) * tex.w * 8,
+               bytes.data() + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch,
+               static_cast<size_t>(tex.w) * 8);
     }
     return out;
 }

@@ -6,6 +6,7 @@
 
 #include "common.h"
 #include "gpu.h"
+#include "nr.h"
 
 struct Options {
     std::string input;
@@ -33,6 +34,7 @@ struct Options {
     bool verbose = false;
     // DLSS Neural Rendering (NGX feature 18) capability probe.
     bool probeNr = false;
+    bool probeCore = false;  // with --probe-nr: also run the routes through the driver core
     bool probeSl = false;
     bool nrRun = false;
     bool nrVideo = false;  // stream raw RGBA frames stdin -> SR+NR -> stdout (ffmpeg on both ends)
@@ -42,13 +44,18 @@ struct Options {
     float nrLocalStructure = 1.0f;   // DLSSNR.LocalStructureStrength
     float nrLocalTone = 1.0f;        // DLSSNR.LocalToneStrength
     float nrSkin = -1.0f;            // DLSSNR.SkinStructureStrength (<0 = model default)
-    float nrGlobalTone = -1.0f;      // DLSSNR.GlobalToneStrength    (<0 = model default)
+    NrPrimeMode nrPrime = NrPrimeMode::None;  // --nr-prime: how the NGX backend is woken
+    bool nrArchSpoof = true;         // report a pre-Blackwell GPU to the model as Blackwell
     bool nrAutoMask = false;         // DLSSNR.UseAutoMask
     bool nrUiCorrection = true;      // DLSSNR.UICorrection
     // Composition of the model's output over the original (host-side).
     float nrDetail = 1.0f;           // overall strength: 0 = original, 1 = full NR
     float nrColour = 1.0f;           // 0 = keep original hue (NR luma only), 1 = NR colour
-    bool nrHdr = false;              // feed linear (HDR) instead of sRGB-encoded colour
+    // Video pipe coding (--nr-video). PQ / HLG sources travel as 16-bit RGBA and get the HDR
+    // path: SDR proxy for the model, linear-light residual back onto the HDR frame.
+    NrTransfer nrTransfer = NrTransfer::Srgb;  // --nr-transfer srgb | pq | hlg
+    int nrPipeBits = 0;                        // --nr-pipe-bits 8 | 16 (0 = 8, or 16 for PQ / HLG)
+    float nrSdrWhite = 203.0f;                 // --nr-sdr-white <nits>: PQ level shown to the model as SDR white
     // Upscaling: NR super-resolves when the output is larger than the input.
     float nrScale = 1.0f;            // output = input * scale
     unsigned nrTargetW = 0, nrTargetH = 0;  // set one side (--nr-width/--nr-height), other by

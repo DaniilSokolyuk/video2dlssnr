@@ -125,6 +125,45 @@ float LinearToSrgb(float c) {
     return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
 }
 
+namespace {
+constexpr float kPqM1 = 0.1593017578125f;  // 2610 / 16384
+constexpr float kPqM2 = 78.84375f;         // 2523 / 4096 * 128
+constexpr float kPqC1 = 0.8359375f;        // 3424 / 4096
+constexpr float kPqC2 = 18.8515625f;       // 2413 / 4096 * 32
+constexpr float kPqC3 = 18.6875f;          // 2392 / 4096 * 32
+constexpr float kHlgA = 0.17883277f;
+constexpr float kHlgB = 0.28466892f;
+constexpr float kHlgC = 0.55991073f;
+}  // namespace
+
+float PqEotfNits(float signal) {
+    const float e = std::min(std::max(signal, 0.0f), 1.0f);
+    const float ep = std::pow(e, 1.0f / kPqM2);
+    const float num = std::max(ep - kPqC1, 0.0f);
+    const float den = kPqC2 - kPqC3 * ep;
+    return 10000.0f * std::pow(num / den, 1.0f / kPqM1);
+}
+
+float PqOetfNits(float nits) {
+    const float l = std::min(std::max(nits, 0.0f), 10000.0f) / 10000.0f;
+    const float lm = std::pow(l, kPqM1);
+    return std::pow((kPqC1 + kPqC2 * lm) / (1.0f + kPqC3 * lm), kPqM2);
+}
+
+float HlgInverseOetf(float signal) {
+    const float e = std::min(std::max(signal, 0.0f), 1.0f);
+    if (e <= 0.5f) return e * e / 3.0f;
+    return (std::exp((e - kHlgC) / kHlgA) + kHlgB) / 12.0f;
+}
+
+float HlgOetf(float sceneLinear) {
+    const float l = std::min(std::max(sceneLinear, 0.0f), 1.0f);
+    if (l <= 1.0f / 12.0f) return std::sqrt(3.0f * l);
+    return kHlgA * std::log(12.0f * l - kHlgB) + kHlgC;
+}
+
+float HlgReferenceWhite() { return HlgInverseOetf(0.75f); }
+
 // A 256-entry LUT is exact for 8-bit input and removes a pow() per channel.
 static const float* Srgb8Lut() {
     static float lut[256];

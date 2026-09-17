@@ -47,10 +47,31 @@ void PrintUsage() {
         "  --json <file>        Write results as JSON (default: <out>/results.json)\n"
         "\n"
         " DLSS Neural Rendering (NGX feature 18, undocumented):\n"
-        "  --probe-nr           Try to create the NR feature and exit. Needs no image.\n"
+        "  --probe-nr           Run the production NR route (forwarder) and report the driver,\n"
+        "                       the nvngx_dlssnr.dll in use and where it stops. Needs no image.\n"
+        "  --probe-core         With --probe-nr: also run the diagnostic routes through the\n"
+        "                       driver core (A, gate, B, C). Off by default - they crash\n"
+        "                       the process on driver 616.64+ with snippet 310.8.0.0.\n"
+        "  --nr-prime <mode>    How the driver's NGX backend is woken before the NR feature is\n"
+        "                       built: none (default - the snippet is only driven through the\n"
+        "                       forwarder), sr (create a DLSS SR/DLAA\n"
+        "                       feature first and keep it alive), core (old behaviour: a core\n"
+        "                       CreateFeature 18 first; crashes on driver 616.64+ - kept for\n"
+        "                       A/B on 616.56)\n"
+        "  --nr-arch-spoof <0|1> Report an RTX 20/30/40 GPU to the model as Blackwell so it\n"
+        "                       agrees to run there (default: 1; does nothing on RTX 50)\n"
         "  --nr-in <WxH>        Probe input size (default: 1920x1080)\n"
         "  --nr-out <WxH>       Probe output size (default: 3840x2160)\n"
         "  --nr-preset <n>      DLSSNR render preset hint (default: 0)\n"
+        "\n"
+        " Video pipe (--nr-video, raw RGBA frames stdin -> stdout):\n"
+        "  --nr-transfer <t>    How the frames are coded: srgb (default, SDR, 8-bit), pq (HDR10 /\n"
+        "                       SMPTE ST 2084) or hlg (ARIB STD-B67). PQ and HLG frames travel as\n"
+        "                       16-bit RGBA (rgba64le); the model is shown an SDR proxy and its edit\n"
+        "                       is put back on the HDR frame as a linear-light residual.\n"
+        "  --nr-pipe-bits <n>   8 or 16 bits per channel on the pipe (default: 8; 16 for pq / hlg)\n"
+        "  --nr-sdr-white <n>   PQ: the luminance, in nits, the model is shown as SDR white\n"
+        "                       (default: 203, BT.2408 graphics white)\n"
         "\n"
         "  -v, --verbose        Verbose logging, including NGX messages\n"
         "  -h, --help           This message\n");
@@ -172,6 +193,13 @@ Options ParseArgs(int argc, char** argv, bool* wantHelp) {
             o.jsonPath = need(i, "--json");
         } else if (a == "--probe-nr") {
             o.probeNr = true;
+        } else if (a == "--probe-core") {
+            o.probeCore = true;
+        } else if (a == "--nr-arch-spoof") {
+            o.nrArchSpoof = toInt(need(i, "--nr-arch-spoof"), "--nr-arch-spoof") != 0;
+        } else if (a == "--nr-prime") {
+            const std::string v = need(i, "--nr-prime");
+            if (!ParseNrPrimeMode(v, &o.nrPrime)) throw ToolError("--nr-prime must be none, core or sr");
         } else if (a == "--probe-sl") {
             o.probeSl = true;
         } else if (a == "--nr-run") {
@@ -188,8 +216,6 @@ Options ParseArgs(int argc, char** argv, bool* wantHelp) {
             o.nrLocalTone = toFloat(need(i, "--nr-local-tone"), "--nr-local-tone");
         } else if (a == "--nr-skin") {
             o.nrSkin = toFloat(need(i, "--nr-skin"), "--nr-skin");
-        } else if (a == "--nr-global-tone") {
-            o.nrGlobalTone = toFloat(need(i, "--nr-global-tone"), "--nr-global-tone");
         } else if (a == "--nr-auto-mask") {
             o.nrAutoMask = true;
         } else if (a == "--nr-ui-correction") {
@@ -198,8 +224,18 @@ Options ParseArgs(int argc, char** argv, bool* wantHelp) {
             o.nrDetail = toFloat(need(i, "--nr-detail"), "--nr-detail");
         } else if (a == "--nr-color" || a == "--nr-colour") {
             o.nrColour = toFloat(need(i, "--nr-color"), "--nr-color");
-        } else if (a == "--nr-hdr") {
-            o.nrHdr = true;
+        } else if (a == "--nr-transfer") {
+            const std::string v = need(i, "--nr-transfer");
+            if (!ParseNrTransfer(v, &o.nrTransfer))
+                throw ToolError("--nr-transfer must be srgb, pq or hlg");
+        } else if (a == "--nr-pipe-bits") {
+            o.nrPipeBits = toInt(need(i, "--nr-pipe-bits"), "--nr-pipe-bits");
+            if (o.nrPipeBits != 8 && o.nrPipeBits != 16)
+                throw ToolError("--nr-pipe-bits must be 8 or 16");
+        } else if (a == "--nr-sdr-white") {
+            o.nrSdrWhite = toFloat(need(i, "--nr-sdr-white"), "--nr-sdr-white");
+            if (!(o.nrSdrWhite >= 1.0f && o.nrSdrWhite <= 10000.0f))
+                throw ToolError("--nr-sdr-white must be between 1 and 10000 nits");
         } else if (a == "--nr-diff") {
             o.nrDiff = true;
         } else if (a == "--nr-orig") {
@@ -237,6 +273,13 @@ Options ParseArgs(int argc, char** argv, bool* wantHelp) {
             throw ToolError("unknown argument '" + a + "' (try --help)");
         }
     }
+
+    if (o.nrTransfer != NrTransfer::Srgb) {
+        if (o.nrPipeBits == 8)
+            throw ToolError("--nr-transfer pq / hlg needs the 16-bit pipe (--nr-pipe-bits 16)");
+        o.nrPipeBits = 16;
+    }
+    if (o.nrPipeBits == 0) o.nrPipeBits = 8;
 
     if (o.probeNr || o.probeSl || o.nrVideo) return o;  // these need no --in image
     if (o.input.empty()) throw ToolError("--in is required (try --help)");

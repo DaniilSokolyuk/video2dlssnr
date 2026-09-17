@@ -16,6 +16,35 @@
 // NGX feature id. Reserved and undocumented in the public headers.
 constexpr int kNgxFeatureNeuralRendering = 18;
 
+// How the driver's NGX backend is woken before the first forwarder create.
+//
+// None is the default and the one that works on driver 616.64+: the snippet is only ever driven
+// through the forwarder (Init_Ext, CreateFeature), and the driver core is never asked to create
+// feature 18. Core is the
+// behaviour every build before this one had - one core CreateFeature(18) first - which from
+// driver 616.64 on faults inside D3D12 (the core now routes feature 18 into snippet 310.8.0.0
+// itself). Sr creates a DLSS Super Resolution feature through the core first and keeps it alive,
+// the way a game's own DLSS would; a fallback in case Init_Ext refuses a cold process.
+enum class NrPrimeMode { None, Core, Sr };
+bool ParseNrPrimeMode(const std::string& s, NrPrimeMode* out);  // none | core | sr
+const char* NrPrimeModeName(NrPrimeMode m);
+
+// The transfer function the video frames arrive in over the pipe (and leave in). Srgb is the
+// SDR default: 8-bit sRGB-coded RGBA, the model works on it directly. Pq (SMPTE ST 2084,
+// HDR10) and Hlg (ARIB STD-B67) are HDR: frames travel as 16-bit RGBA, the tool linearises
+// them, shows the model an SDR proxy and puts the model's edit back on the HDR frame as a
+// linear-light residual (see GpuContext::RecordComposite).
+enum class NrTransfer { Srgb, Pq, Hlg };
+bool ParseNrTransfer(const std::string& s, NrTransfer* out);  // srgb | pq | hlg
+const char* NrTransferName(NrTransfer t);
+
+// How the frames on the video pipe are coded.
+struct NrVideoSignal {
+    NrTransfer transfer = NrTransfer::Srgb;
+    bool pipe16 = false;          // 16-bit RGBA (rgba64le) instead of 8-bit; forced for PQ / HLG
+    float sdrWhiteNits = 203.0f;  // PQ: the luminance that counts as SDR white (BT.2408: 203)
+};
+
 // Parameter keys, taken verbatim from the strings the DLL and the addon share.
 namespace NrParam {
 constexpr const char* kEnabled = "DLSSNR.Enabled";
@@ -116,26 +145,32 @@ private:
 
 // One-shot capability probe: init, try to create feature 18, report what NGX
 // said. Prints the loaded DLL and its version so the answer is attributable.
+// The production (forwarder) route runs first; the routes that go through the driver core
+// only run with probeCore (they crash the process on driver 616.64+ with snippet 310.8.0.0).
 int ProbeNeuralRendering(const std::string& dllDir, int adapter, unsigned inputW,
                          unsigned inputH, unsigned outputW, unsigned outputH,
-                         unsigned preset, bool verbose);
+                         unsigned preset, NrPrimeMode prime, bool probeCore, bool verbose);
 
 // Runs DLSS Neural Rendering (feature 18) over an image or a whole folder via the
 // forwarder shim. inPath may be a single image or a directory (every image in it).
 // The feature is created once per resolution and reused (create is the expensive
 // step; evaluate is cheap - which is why a game runs at 60 fps). Writes
 // <name>_nr.png, <name>_orig.png and <name>_nr_diff.png per image into outDir.
-// `model` are the model's own params (latched at create); detail/colour/hdr control
-// how the model's output is composed back over the original.
+// `model` are the model's own params (latched at create); detail/colour control how the
+// model's output is composed back over the original.
 int RunNeuralRendering(const std::string& dllDir, int adapter, const std::string& inPath,
                        const std::string& outDir, const NrModelParams& model, float detail,
-                       float colour, bool hdr, float scale, unsigned outWReq, unsigned outHReq,
-                       unsigned srPreset, bool writeDiff, bool writeOrig, bool verbose);
+                       float colour, float scale, unsigned outWReq, unsigned outHReq,
+                       unsigned srPreset, NrPrimeMode prime, bool writeDiff, bool writeOrig,
+                       bool verbose);
 
 // Streaming video filter: raw RGBA frames of size inW x inH on stdin, DLSS SR + NR, raw RGBA
 // frames on stdout. Driven by ffmpeg on both ends (decode / NVENC encode). The feature is
-// built once for the whole stream. Logs go to stderr.
+// built once for the whole stream. Logs go to stderr. `signal` says how the frames are coded:
+// 8-bit sRGB (SDR), or 16-bit PQ / HLG (HDR - the model works on an SDR proxy and its edit is
+// applied back to the HDR frame as a linear-light residual).
 int RunNeuralRenderingVideo(const std::string& dllDir, int adapter, unsigned inW, unsigned inH,
-                            const NrModelParams& model, float detail, float colour, bool hdr,
-                            float scale, unsigned outWReq, unsigned outHReq, bool motionOn,
-                            bool motionVis, int motionEngine, unsigned srPreset, bool verbose);
+                            const NrModelParams& model, float detail, float colour,
+                            const NrVideoSignal& signal, float scale, unsigned outWReq,
+                            unsigned outHReq, bool motionOn, bool motionVis, int motionEngine,
+                            unsigned srPreset, NrPrimeMode prime, bool verbose);

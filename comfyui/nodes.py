@@ -8,6 +8,11 @@ Two nodes, mirroring the two tabs of the Gradio UI:
                                      --nr-video with optical-flow motion vectors, so NR stays
                                      temporally stable. Frames go to the exe as raw RGBA over a
                                      pipe and come back the same way: no ffmpeg, no temp files.
+                                     HDR clips (PQ / HLG) are recognised from the Load Video
+                                     source and take the tool's HDR path: 16-bit frames, an SDR
+                                     proxy for the model, the edit back on the HDR frame as a
+                                     linear-light residual; the VIDEO output is tagged 10-bit
+                                     HDR PQ / HLG the way the core Create Video node does.
 
 video2dlssnr.exe (with its runtime DLLs next to it) is looked up in this order:
   1. the VIDEO2DLSSNR_EXE environment variable — full path to video2dlssnr.exe;
@@ -33,6 +38,15 @@ STYLES = {"Default": 0, "Natural": 1, "Cinematic": 2}
 PRESETS = {"Default": 0, "Preset 1": 1, "Preset 2": 2, "Preset 3": 3}
 ENGINES = ["auto", "nvof", "lk"]
 SR_PRESETS = ["Default", "E", "F", "J", "K", "L", "M"]
+# How the clip is coded. auto reads the transfer characteristic of the connected VIDEO's source
+# stream (an IMAGE batch carries none and counts as SDR); the rest override it.
+HDR_SOURCES = ["auto", "sdr", "pq", "hlg"]
+# ffmpeg / PyAV transfer characteristic -> the tool's --nr-transfer, and the ComfyUI colour space
+# name the core Create Video / Save Video nodes use for it.
+AV_TRC_SMPTE2084, AV_TRC_ARIB_STD_B67 = 16, 18
+TRC_TO_TRANSFER = {"smpte2084": "pq", "arib-std-b67": "hlg",
+                   AV_TRC_SMPTE2084: "pq", AV_TRC_ARIB_STD_B67: "hlg"}
+COMFY_COLOR_SPACE = {"pq": "HDR PQ", "hlg": "HDR"}
 
 
 # ----------------------------------------------------------------------------- tool lookup
@@ -49,20 +63,56 @@ def find_exe():
         "folder of a video2dlssnr release into: " + os.path.join(HERE, "bin"))
 
 
-def nr_args(style, preset, intensity, local_structure, local_tone, skin, global_tone, detail,
-            color, ui_correction, auto_mask, hdr, sr_preset="Default"):
+def nr_args(style, preset, intensity, local_structure, local_tone, skin, detail,
+            color, ui_correction, auto_mask, sr_preset="Default"):
     """NR model + composite flags, named exactly like the CLI (--nr-*)."""
     a = ["--nr-sr-preset", "default" if sr_preset == "Default" else sr_preset,
          "--nr-style", str(STYLES[style]), "--nr-preset", str(PRESETS[preset]),
          "--nr-intensity", f"{intensity}", "--nr-local-structure", f"{local_structure}",
-         "--nr-local-tone", f"{local_tone}", "--nr-skin", f"{skin}",
-         "--nr-global-tone", f"{global_tone}", "--nr-detail", f"{detail}",
+         "--nr-local-tone", f"{local_tone}", "--nr-skin", f"{skin}", "--nr-detail", f"{detail}",
          "--nr-color", f"{color}", "--nr-ui-correction", "1" if ui_correction else "0"]
     if auto_mask:
         a.append("--nr-auto-mask")
-    if hdr:
-        a.append("--nr-hdr")
     return a
+
+
+def probe_transfer(video):
+    """'pq' / 'hlg' when the VIDEO input's source stream is tagged HDR, else None.
+
+    Load Video hands frames over as coded values (PQ / HLG code in a float tensor) without saying
+    which curve they are on; the stream itself still knows. Opened read-only with PyAV, which
+    ComfyUI ships; anything that fails means "treat as SDR"."""
+    try:
+        src = video.get_stream_source()
+    except Exception:
+        return None
+    try:
+        import av
+        if hasattr(src, "seek"):
+            src.seek(0)
+        with av.open(src) as container:
+            stream = container.streams.video[0]
+            trc = getattr(stream.codec_context, "color_trc", None)
+            if trc is None:
+                trc = getattr(stream, "color_trc", None)
+            name = getattr(trc, "name", None)
+            key = str(name).lower().replace("_", "-") if name else int(trc)
+            return TRC_TO_TRANSFER.get(key)
+    except Exception:
+        return None
+    finally:
+        try:
+            if hasattr(src, "seek"):
+                src.seek(0)
+        except Exception:
+            pass
+
+
+def resolve_transfer(hdr_source, video):
+    """The tool's --nr-transfer for this job: None for SDR."""
+    if hdr_source == "auto":
+        return probe_transfer(video) if video is not None else None
+    return None if hdr_source == "sdr" else hdr_source
 
 
 def out_dims(in_w, in_h, width, scale, height=0):
@@ -106,24 +156,32 @@ def run_image_np(img_u8, width, scale, nr, exe, adapter=0, height=0):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def run_video_np(frames_u8, width, scale, nr, motion, engine, motion_vis, exe, adapter=0,
-                 progress=None, log=None, height=0):
-    """uint8 RGB [B,H,W,3] frames streamed through --nr-video; returns uint8 RGB [B,H',W',3].
+def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adapter=0,
+                 progress=None, log=None, height=0, transfer=None, sdr_white=203.0):
+    """RGB [B,H,W,3] frames streamed through --nr-video; returns RGB [B,H',W',3] of the same dtype.
 
-    `progress(n)` is called with the frame count as the tool reports it; `log`, if a list, receives
-    the tool's non-progress stderr lines (backend in use, final tally, any warnings).
+    uint8 frames are SDR (sRGB) and travel 8-bit. uint16 frames carry PQ / HLG code values and
+    travel 16-bit with --nr-transfer, so the tool takes its HDR path. `progress(n)` is called with
+    the frame count as the tool reports it; `log`, if a list, receives the tool's non-progress
+    stderr lines (backend in use, final tally, any warnings).
     """
-    b, h, w, _ = frames_u8.shape
+    b, h, w, _ = frames.shape
+    wide = frames.dtype == np.uint16
+    if bool(transfer) != wide:
+        raise ValueError("HDR frames must be uint16 with a transfer, SDR frames uint8 without")
     out_w, out_h = out_dims(w, h, width, scale, height)
     cmd = [exe, "--nr-video", "--nr-in", f"{w}x{h}", "--adapter", str(adapter)] + nr + [
         "--nr-motion", "1" if motion else "0", "--nr-motion-engine", engine]
+    if transfer:
+        cmd += ["--nr-transfer", transfer, "--nr-sdr-white", f"{sdr_white:g}"]
     if motion_vis:
         cmd.append("--nr-motion-vis")
     if (out_w, out_h) != (w, h):  # exact even dims so the tool and this reader agree
         cmd += ["--nr-width", str(out_w), "--nr-height", str(out_h)]
 
-    alpha = np.full((b, h, w, 1), 255, np.uint8)
-    rgba = np.concatenate([frames_u8, alpha], axis=3)
+    alpha = np.full((b, h, w, 1), 65535 if wide else 255, frames.dtype)
+    rgba = np.concatenate([frames, alpha], axis=3)
+    bpp = 8 if wide else 4
 
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE)
@@ -154,7 +212,7 @@ def run_video_np(frames_u8, width, scale, nr, motion, engine, motion_vis, exe, a
     tf.start()
     td.start()
 
-    need = b * out_w * out_h * 4
+    need = b * out_w * out_h * bpp
     buf = bytearray(need)
     view = memoryview(buf)
     got = 0
@@ -171,7 +229,7 @@ def run_video_np(frames_u8, width, scale, nr, motion, engine, motion_vis, exe, a
     if rc != 0 or got != need:
         raise RuntimeError(f"video2dlssnr failed (exit {rc}, got {got}/{need} bytes)\n"
                            + "\n".join(err)[-3000:])
-    return np.frombuffer(buf, np.uint8).reshape(b, out_h, out_w, 4)[..., :3]
+    return np.frombuffer(buf, frames.dtype).reshape(b, out_h, out_w, 4)[..., :3]
 
 
 # ----------------------------------------------------------------------------- tensor glue
@@ -182,21 +240,36 @@ def to_u8(t):
     return np.ascontiguousarray(x[..., :3])
 
 
-def to_tensor(u8):
-    return torch.from_numpy(np.ascontiguousarray(u8).astype(np.float32) / 255.0)
+def to_u16(t):
+    """ComfyUI IMAGE [B,H,W,C] float 0..1 (PQ / HLG code values) -> uint16 RGB [B,H,W,3]."""
+    x = t.detach().cpu().clamp(0, 1).mul(65535).round().to(torch.int32).numpy().astype(np.uint16)
+    return np.ascontiguousarray(x[..., :3])
 
 
-def make_video(images, audio, frame_rate):
+def to_tensor(arr):
+    full = 65535.0 if arr.dtype == np.uint16 else 255.0
+    return torch.from_numpy(np.ascontiguousarray(arr).astype(np.float32) / full)
+
+
+def make_video(images, audio, frame_rate, transfer=None):
     """Wrap frames into ComfyUI's VIDEO type the way the core Create Video node does.
 
-    Returns None on ComfyUI builds that predate the VIDEO type, so the IMAGE output still works.
+    An HDR clip is tagged 10-bit "HDR PQ" / "HDR" (HLG) so Save Video writes BT.2020 / PQ or HLG
+    at 10 bits; the frames already hold the code values. Returns None on ComfyUI builds that
+    predate the VIDEO type, so the IMAGE output still works.
     """
     try:
         from comfy_api.input_impl import VideoFromComponents
         from comfy_api.util import VideoComponents
     except Exception:
         return None
-    return VideoFromComponents(VideoComponents(images=images, audio=audio, frame_rate=frame_rate))
+    comps = VideoComponents(images=images, audio=audio, frame_rate=frame_rate)
+    if transfer:
+        try:
+            return VideoFromComponents(comps, bit_depth=10, color_space=COMFY_COLOR_SPACE[transfer])
+        except TypeError:  # an older ComfyUI without HDR video: the frames are still right
+            pass
+    return VideoFromComponents(comps)
 
 
 def _nr_inputs():
@@ -208,12 +281,10 @@ def _nr_inputs():
         "local_structure": f(1.0, 0.0, 2.0),
         "local_tone": f(1.0, 0.0, 2.0),
         "skin": f(-1.0, -1.0, 2.0),          # -1 = model default
-        "global_tone": f(-1.0, -1.0, 2.0),   # <0 = model default
         "detail": f(1.0, 0.0, 2.0),          # composite: 0 = original, 1 = full NR
         "color": f(1.0, 0.0, 1.0),           # 0 = keep original hue, 1 = NR colour
         "ui_correction": ("BOOLEAN", {"default": False}),
         "auto_mask": ("BOOLEAN", {"default": False}),
-        "hdr": ("BOOLEAN", {"default": False}),
         "scale": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 3.0, "step": 0.05}),
         "width": ("INT", {"default": 0, "min": 0, "max": 7680, "step": 2,
                           "tooltip": "Output width (height by aspect unless height is set too). "
@@ -248,11 +319,11 @@ class DLSSNRImage:
     DESCRIPTION = ("DLSS Super Resolution + Neural Rendering on each image independently "
                    "(same as the Image tab). width pins the output width, else scale.")
 
-    def run(self, image, style, preset, intensity, local_structure, local_tone, skin, global_tone,
-            detail, color, ui_correction, auto_mask, hdr, scale, width, height, adapter, sr_preset):
+    def run(self, image, style, preset, intensity, local_structure, local_tone, skin,
+            detail, color, ui_correction, auto_mask, scale, width, height, adapter, sr_preset):
         exe = find_exe()
-        nr = nr_args(style, preset, intensity, local_structure, local_tone, skin, global_tone,
-                     detail, color, ui_correction, auto_mask, hdr, sr_preset)
+        nr = nr_args(style, preset, intensity, local_structure, local_tone, skin,
+                     detail, color, ui_correction, auto_mask, sr_preset)
         src = to_u8(image)
         outs = [run_image_np(src[i], width, scale, nr, exe, adapter, height)
                 for i in range(src.shape[0])]
@@ -276,6 +347,16 @@ class DLSSNRVideo:
                 "motion_engine": (ENGINES, {"default": "auto"}),
                 "motion_vis": ("BOOLEAN", {"default": False,
                                            "tooltip": "Debug: output the flow field instead of NR."}),
+                "hdr_source": (HDR_SOURCES, {"default": "auto",
+                                             "tooltip": "auto: read the connected VIDEO's transfer "
+                                                        "tag (PQ / HLG clips take the HDR path; an IMAGE "
+                                                        "batch counts as SDR). sdr / pq / hlg override "
+                                                        "it for a mistagged clip. HDR output: feed the "
+                                                        "VIDEO to Save Video (10-bit, HDR PQ / HDR)."}),
+                "sdr_white": ("FLOAT", {"default": 203.0, "min": 50.0, "max": 1000.0, "step": 1.0,
+                                        "tooltip": "HDR PQ: the luminance in nits the model is shown as "
+                                                   "SDR white (203 = BT.2408 graphics white; lower = "
+                                                   "brighter proxy, more detail in the shadows)."}),
             },
             "optional": {
                 "video": ("VIDEO", {"tooltip": "From the core Load Video node. Its audio and frame "
@@ -296,12 +377,15 @@ class DLSSNRVideo:
     CATEGORY = "video2dlssnr"
     DESCRIPTION = ("A clip through DLSS SR + Neural Rendering with optical-flow motion vectors for "
                    "temporal stability (same as the Video tab). Connect the core Load Video (VIDEO) "
-                   "or an IMAGE batch; get frames and a ready VIDEO (audio and fps kept) back.")
+                   "or an IMAGE batch; get frames and a ready VIDEO (audio and fps kept) back. HDR "
+                   "clips (PQ / HLG) are handled as HDR and the VIDEO output is tagged accordingly.")
 
-    def run(self, style, preset, intensity, local_structure, local_tone, skin, global_tone,
-            detail, color, ui_correction, auto_mask, hdr, scale, width, height, adapter, sr_preset,
-            motion, motion_engine, motion_vis, video=None, images=None, images_fps=24.0):
+    def run(self, style, preset, intensity, local_structure, local_tone, skin,
+            detail, color, ui_correction, auto_mask, scale, width, height, adapter, sr_preset,
+            motion, motion_engine, motion_vis, hdr_source="auto", sdr_white=203.0, video=None,
+            images=None, images_fps=24.0):
         audio, frame_rate = None, None
+        transfer = resolve_transfer(hdr_source, video)
         if video is not None:
             comps = video.get_components()
             images, audio, frame_rate = comps.images, comps.audio, comps.frame_rate
@@ -311,9 +395,10 @@ class DLSSNRVideo:
             frame_rate = Fraction(images_fps).limit_denominator(1000)
 
         exe = find_exe()
-        nr = nr_args(style, preset, intensity, local_structure, local_tone, skin, global_tone,
-                     detail, color, ui_correction, auto_mask, hdr, sr_preset)
-        src = to_u8(images)
+        nr = nr_args(style, preset, intensity, local_structure, local_tone, skin,
+                     detail, color, ui_correction, auto_mask, sr_preset)
+        # HDR frames keep their PQ / HLG code values and travel 16-bit; SDR frames travel 8-bit.
+        src = to_u16(images) if transfer else to_u8(images)
         total = src.shape[0]
         pbar = None
         try:
@@ -327,9 +412,9 @@ class DLSSNRVideo:
                 pbar.update_absolute(min(done, total))
 
         out = run_video_np(src, width, scale, nr, motion, motion_engine, motion_vis, exe, adapter,
-                           progress, height=height)
+                           progress, height=height, transfer=transfer, sdr_white=sdr_white)
         out_t = to_tensor(out)
-        return (out_t, make_video(out_t, audio, frame_rate))
+        return (out_t, make_video(out_t, audio, frame_rate, transfer))
 
 
 class DLSSNRRuntimeInfo:
