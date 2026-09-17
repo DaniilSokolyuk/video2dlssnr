@@ -7,6 +7,7 @@
 // temporal reconstruction rather than a one-shot spatial upscale — which is what
 // makes preset differences visible.
 
+#include "archspoof.h"
 #include "cli.h"
 #include "common.h"
 #include "nr.h"
@@ -117,10 +118,11 @@ static int Run(int argc, char** argv) {
     // Default the DLL directory to the executable's own folder, so dropping nvngx_dlssnr.dll
     // next to video2dlssnr.exe works with no --dll-dir.
     if (o.dllDir.empty()) o.dllDir = ExeDir();
+    SetArchSpoofEnabled(o.nrArchSpoof);
 
     if (o.probeNr) {
         return ProbeNeuralRendering(o.dllDir, o.adapter, o.nrInW, o.nrInH, o.nrOutW,
-                                    o.nrOutH, o.nrPreset, o.verbose);
+                                    o.nrOutH, o.nrPreset, o.nrPrime, o.probeCore, o.verbose);
     }
 
     if (o.probeSl) {
@@ -135,13 +137,16 @@ static int Run(int argc, char** argv) {
         vm.localStructure = o.nrLocalStructure;
         vm.localTone = o.nrLocalTone;
         vm.skinStructure = o.nrSkin;
-        vm.globalTone = o.nrGlobalTone;
         vm.autoMask = o.nrAutoMask ? 1u : 0u;
         vm.uiCorrection = o.nrUiCorrection ? 1u : 0u;
+        NrVideoSignal sig;
+        sig.transfer = o.nrTransfer;
+        sig.pipe16 = (o.nrPipeBits == 16);
+        sig.sdrWhiteNits = o.nrSdrWhite;
         return RunNeuralRenderingVideo(o.dllDir, o.adapter, o.nrInW, o.nrInH, vm, o.nrDetail,
-                                       o.nrColour, o.nrHdr, o.nrScale, o.nrTargetW, o.nrTargetH,
+                                       o.nrColour, sig, o.nrScale, o.nrTargetW, o.nrTargetH,
                                        o.nrMotion, o.nrMotionVis, o.nrMotionEngine, o.nrSrPreset,
-                                       o.verbose);
+                                       o.nrPrime, o.verbose);
     }
 
     if (o.nrRun) {
@@ -153,12 +158,11 @@ static int Run(int argc, char** argv) {
         model.localStructure = o.nrLocalStructure;
         model.localTone = o.nrLocalTone;
         model.skinStructure = o.nrSkin;
-        model.globalTone = o.nrGlobalTone;
         model.autoMask = o.nrAutoMask ? 1u : 0u;
         model.uiCorrection = o.nrUiCorrection ? 1u : 0u;
         return RunNeuralRendering(o.dllDir, o.adapter, o.input, outDir, model, o.nrDetail,
-                                  o.nrColour, o.nrHdr, o.nrScale, o.nrTargetW, o.nrTargetH,
-                                  o.nrSrPreset, o.nrDiff, o.nrOrig, o.verbose);
+                                  o.nrColour, o.nrScale, o.nrTargetW, o.nrTargetH,
+                                  o.nrSrPreset, o.nrPrime, o.nrDiff, o.nrOrig, o.verbose);
     }
 
     // Expand the 'all' shorthands.

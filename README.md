@@ -29,7 +29,7 @@ the video script and the ComfyUI nodes are thin Python wrappers around it.
 
 ## Requirements
 
-Barely anything: an NVIDIA RTX GPU on **driver 616.56+** and **Python 3**.
+Barely anything: an NVIDIA RTX GPU on **driver 616.56 or newer** and **Python 3**.
 
 ## UI
 
@@ -97,14 +97,27 @@ Typical graphs:
 <p align="center"><sub><b>Load Video → DLSS Neural Rendering (Video) → Save Video</b> on a 4K clip · the <b>Image</b> node with its knobs (click to enlarge)</sub></p>
 
 Both processing nodes expose the same knobs as the CLI — `style`, `preset`, `intensity`,
-`local_structure`, `local_tone`, `skin`, `global_tone`, `detail`, `color`, `ui_correction`,
-`auto_mask`, `hdr`, `scale` / `width` / `height` (one side pins the aspect, both pin the exact size,
+`local_structure`, `local_tone`, `skin`, `detail`, `color`, `ui_correction`,
+`auto_mask`, `scale` / `width` / `height` (one side pins the aspect, both pin the exact size,
 `0` = use scale) — plus `adapter`
-(which GPU); the Video node adds `motion`, `motion_engine` (`auto` / `nvof` / `lk`), `motion_vis`
+(which GPU); the Video node adds `motion`, `motion_engine` (`auto` / `nvof` / `lk`), `motion_vis`,
+`hdr_source`, `sdr_white`
 and `images_fps` — frame-rate metadata for the `VIDEO` output when the input is an `IMAGE` batch
 (it does not add frames; with a `VIDEO` input the source rate is used). The frame count in equals
 the frame count out — to raise the frame rate, chain a frame-interpolation node (e.g. GIMM-VFI,
 RIFE) after it.
+
+**HDR in ComfyUI.** With a `VIDEO` input the node reads the source's transfer tag: an HDR10 / PQ
+or HLG clip takes the HDR path (16-bit frames, SDR proxy for the model, the edit back on the HDR
+frame as a linear-light residual) and the `VIDEO` output comes out tagged 10-bit **HDR PQ** /
+**HDR** the way the core Create Video node does, so **Load Video → DLSS Neural Rendering (Video) →
+Save Video** keeps the clip HDR. This needs a ComfyUI with HDR video saving (Comfy-Org/ComfyUI
+PRs [#15741](https://github.com/Comfy-Org/ComfyUI/pull/15741) and
+[#15810](https://github.com/Comfy-Org/ComfyUI/pull/15810)); on an older build the frames are still
+right but the file is written as SDR-tagged. An `IMAGE` batch carries no colour tags and counts as
+SDR — set `hdr_source` to `pq` / `hlg` yourself if the frames came from an HDR clip (e.g. via
+VideoHelperSuite), then hand the `VIDEO` output to Save Video. `sdr_white` is the PQ level the
+model is shown as SDR white (203 nits by default).
 
 Frames travel to the tool as raw RGBA over a pipe and come back the same way — no ffmpeg, no temp
 files — and a driver hiccup takes down the helper process, not ComfyUI. Nodes need nothing beyond
@@ -178,6 +191,15 @@ target a fixed bitrate instead. Audio is copied unchanged whenever the container
 re-encoded (AAC, or Opus for webm). Sizes smaller than the source are done by ffmpeg after NR
 (DLSS only enlarges); above 3× the tool chains DLSS passes.
 
+**HDR clips (HDR10 / PQ, HLG) need no flag.** They are recognised from their colour tags and take
+the HDR path: frames travel as 16-bit RGBA, the tool linearises them, shows the model an SDR
+**proxy** and puts the model's edit back on the HDR frame as a **linear-light residual**, so
+brightness, highlights and the wide gamut stay exactly as they were and only the detail changes
+(see [How it works](#how-it-works)). The output keeps the source's transfer and primaries, is
+always 10-bit, and cannot be H.264. `--nr-sdr-white` sets which luminance the model is shown as
+SDR white (203 nits by default). Static HDR metadata (MaxCLL, mastering display) is not carried
+over; players fall back to the stream's own levels.
+
 Progress prints live, e.g. `[=====>  ] 95/124 (77%)  25.9 fps  ETA 00:01`, then a final line
 with the steady-state GPU fps. `ffmpeg` / `ffprobe` are looked up in `out\`, then on `PATH`, then a
 winget **Gyan.FFmpeg** install. ProRes is CPU-decoded (NVDEC can't); everything else decodes fine.
@@ -197,10 +219,10 @@ winget **Gyan.FFmpeg** install. ProRes is CPU-decoded (NVDEC can't); everything 
 | `--nr-local-structure <f>` | 1.0 | local structure strength (0–2) |
 | `--nr-local-tone <f>` | 1.0 | local tone strength (0–2) |
 | `--nr-skin <f>` | -1.0 | skin structure strength (−1 = model default) |
-| `--nr-global-tone <f>` | -1.0 | global tone strength (<0 = model default) |
 | `--nr-detail <f>` | 1.0 | composite strength: 0 = original, 1 = full NR |
 | `--nr-color <f>` | 1.0 | 0 = keep original hue, 1 = NR colour |
-| `--nr-hdr` | off | feed linear light instead of the sRGB proxy |
+| `--nr-transfer <t>` | `auto` | how the source is coded: `auto` (from the clip's tags), or force `srgb` / `pq` / `hlg` when the tags are wrong |
+| `--nr-sdr-white <nits>` | 203 | HDR: the luminance shown to the model as SDR white (BT.2408 graphics white; lower = brighter proxy) |
 | `--nr-ui-correction <0\|1>` | 0 | NR UI correction (off — no game UI) |
 | `--nr-auto-mask` | off | NR automatic mask |
 | `--nr-motion <0\|1>` | 1 | optical-flow motion vectors for NR (temporal stability) |
@@ -246,7 +268,6 @@ winget **Gyan.FFmpeg** install. ProRes is CPU-decoded (NVDEC can't); everything 
 | `--nr-local-structure <f>` | 0.0–2.0 | 1.0 | local structure strength |
 | `--nr-local-tone <f>` | 0.0–2.0 | 1.0 | local tone strength |
 | `--nr-skin <f>` | -1.0–2.0 | model default | skin structure strength (-1 or below = leave at the model's default) |
-| `--nr-global-tone <f>` | 0.0–2.0 | model default | global tone strength (below 0 = leave at default) |
 | `--nr-auto-mask` | on/off | off | the model's automatic mask |
 | `--nr-ui-correction <0\|1>` | 0 or 1 | 1 | UI correction |
 
@@ -265,7 +286,15 @@ Composition — how much of the model's output to keep (blended over the origina
 |---|---|---|---|
 | `--nr-detail <f>` | 0.0–2.0 | 1.0 | overall strength: **0 = the original**, 1 = full NR, >1 exaggerates |
 | `--nr-color <f>` | 0.0–1.0 | 1.0 | 0 = keep the original hue (NR luma only), 1 = adopt the model's colour |
-| `--nr-hdr` | on/off | off | feed linear light instead of the default sRGB-encoded proxy |
+
+Video pipe (`--nr-video`, raw RGBA frames on stdin / stdout - what `nr_video.py` drives):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--nr-in <WxH>` | — | frame size on stdin |
+| `--nr-transfer <t>` | `srgb` | how the frames are coded: `srgb` (SDR, 8-bit), `pq` (SMPTE ST 2084 / HDR10) or `hlg` (ARIB STD-B67). PQ / HLG travel as 16-bit RGBA (`rgba64le`) and take the HDR path |
+| `--nr-pipe-bits <8\|16>` | 8 (16 for PQ / HLG) | bits per channel on the pipe |
+| `--nr-sdr-white <nits>` | 203 | PQ: the luminance the model is shown as SDR white |
 
 #### Super Resolution
 
@@ -292,7 +321,10 @@ Composition — how much of the model's output to keep (blended over the origina
 
 | Flag | Meaning |
 |---|---|
-| `--probe-nr` | try to create the NR feature and report where it stops; needs no image |
+| `--probe-nr` | create the NR feature the way the tool does and report the driver, the `nvngx_dlssnr.dll` in use and where it stops; needs no image |
+| `--probe-core` | with `--probe-nr`: also try the routes through the driver's NGX core (diagnostic only) |
+| `--nr-prime <mode>` | `none` (default) / `sr` / `core`: what to warm up before the NR feature is built; leave at the default unless asked |
+| `--nr-arch-spoof <0\|1>` | report an RTX 20/30/40 GPU to the model as RTX 50 so it runs there (default 1; no effect on RTX 50) |
 | `--probe-sl` | drive Streamline and report whether it sees DLSS-NR as supported |
 | `--nr-in <WxH>` / `--nr-out <WxH>` | probe input / output size |
 | `--sl-feature <id>` | Streamline feature id to probe (default 1004 = DLSS-NR) |
@@ -311,6 +343,25 @@ flow: hardware **NVOFA** if present, else a compute-shader **Lucas–Kanade** fa
 (`--nr-motion-engine`). A scene-cut check resets history on cuts; `--nr-motion-vis` dumps the flow
 field for debugging. Between decode and encode nothing goes back to the CPU — a compute shader
 composites the result over the original and packs the 8-bit frame.
+
+**HDR.** The model was trained on SDR game frames and knows nothing about PQ or HLG. Feeding it
+PQ code values as if they were sRGB "works" (the round trip is consistent) but the model sees a
+low-contrast picture and its edits, made in code-value space, land as large luminance jumps in the
+highlights; applying an sRGB curve on top of PQ (what the old "HDR (linear)" option did to an
+HDR clip) simply overexposes everything. So an HDR frame is handled the way NeuralScreen handles an HDR desktop:
+
+```
+C      = linear light, 1.0 = SDR white (PQ: --nr-sdr-white nits; HLG: signal 0.75)
+P      = max(0, C.r, C.g, C.b)
+proxy  = sRGB( C / (1 + P) )                         what the model is shown - SDR, never above 1
+out    = C + (1 + P) · clamp( lin(NR) − C / (1 + P), ±0.25 ) · detail
+```
+
+The proxy leaves the dark end untouched and rolls the highlights off smoothly; the model's edit
+comes back as a residual scaled by the same per-pixel gain, so an unchanged proxy leaves the pixel
+exactly as it was and the HDR highlights, the wide gamut and the average brightness survive. The
+16-bit pipe keeps PQ free of banding. The optical flow gets the same proxy, left linear. `--nr-color`
+and `--nr-detail` apply to the residual as they do to the SDR composite.
 
 ## Build
 

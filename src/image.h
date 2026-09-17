@@ -20,6 +20,15 @@ struct ImageF {
 float SrgbToLinear(float c);
 float LinearToSrgb(float c);
 
+// HDR transfer functions, per channel. PQ (SMPTE ST 2084) is absolute: the signal codes
+// nits, up to 10000. HLG (ARIB STD-B67) is scene-referred: the signal codes relative scene
+// light 0..1, with reference white at signal 0.75 (BT.2408).
+float PqEotfNits(float signal);   // 0..1 -> nits
+float PqOetfNits(float nits);     // nits -> 0..1
+float HlgInverseOetf(float signal);  // 0..1 -> scene linear 0..1
+float HlgOetf(float sceneLinear);    // scene linear 0..1 -> 0..1
+float HlgReferenceWhite();           // HlgInverseOetf(0.75): scene-linear level of HLG reference white
+
 // Loads PNG/JPG/BMP/TGA (8- or 16-bit) and converts to linear RGBA float.
 // Alpha is passed through unchanged (alpha is not gamma encoded).
 ImageF LoadImageLinear(const std::string& path);

@@ -10,6 +10,7 @@
 // CPU only:            video2dlssnr_tests.exe --no-gpu
 // One group:           video2dlssnr_tests.exe --filter Downsample
 
+#include "archspoof.h"
 #include "cli.h"
 #include "common.h"
 #include "dlss.h"
@@ -208,6 +209,67 @@ static void Test_SrgbRoundTrip() {
     EXPECT_TRUE(LinearToSrgb(-1.0f) == 0.0f);
 }
 
+static void Test_PqTransfer() {
+    // SMPTE ST 2084 anchors: code 0 is black, code 1 is 10000 nits, and the two levels the HDR
+    // path leans on - 100 nits (the SDR peak of the old broadcast world) and BT.2408's 203-nit
+    // graphics white - sit where the standard puts them.
+    EXPECT_NEAR(PqEotfNits(0.0f), 0.0, 1e-6);
+    EXPECT_NEAR(PqEotfNits(1.0f), 10000.0, 0.5);
+    EXPECT_NEAR(PqOetfNits(100.0f), 0.5081, 5e-4);
+    EXPECT_NEAR(PqOetfNits(203.0f), 0.5806, 5e-4);
+    EXPECT_NEAR(PqOetfNits(1000.0f), 0.7518, 5e-4);
+    for (int i = 0; i <= 100; ++i) {
+        const float v = i / 100.0f;
+        EXPECT_NEAR(PqOetfNits(PqEotfNits(v)), v, 2e-4);
+    }
+    // Monotonic, so a 16-bit lookup table built from it is too.
+    float prev = -1.0f;
+    for (int i = 0; i <= 1000; ++i) {
+        const float n = PqEotfNits(i / 1000.0f);
+        EXPECT_TRUE(n >= prev);
+        prev = n;
+    }
+}
+
+static void Test_HlgTransfer() {
+    // ARIB STD-B67: signal 0.5 is the knee (scene light 1/12), 0.75 is reference white, 1.0 is
+    // peak (scene light 1.0).
+    EXPECT_NEAR(HlgInverseOetf(0.0f), 0.0, 1e-7);
+    EXPECT_NEAR(HlgInverseOetf(0.5f), 1.0 / 12.0, 1e-5);
+    EXPECT_NEAR(HlgInverseOetf(0.75f), 0.2650, 5e-4);
+    EXPECT_NEAR(HlgInverseOetf(1.0f), 1.0, 2e-4);
+    EXPECT_NEAR(HlgReferenceWhite(), HlgInverseOetf(0.75f), 1e-7);
+    for (int i = 0; i <= 100; ++i) {
+        const float v = i / 100.0f;
+        EXPECT_NEAR(HlgOetf(HlgInverseOetf(v)), v, 2e-4);
+    }
+}
+
+static void Test_ParseArgsNrTransfer() {
+    // Default: SDR over the 8-bit pipe.
+    const Options d = ParseCli({"--nr-video"});
+    EXPECT_TRUE(d.nrTransfer == NrTransfer::Srgb);
+    EXPECT_EQ(d.nrPipeBits, 8);
+    EXPECT_NEAR(d.nrSdrWhite, 203.0, 1e-6);
+    // PQ / HLG imply the 16-bit pipe; the names are case-insensitive and take the usual aliases.
+    const Options pq = ParseCli({"--nr-video", "--nr-transfer", "PQ", "--nr-sdr-white", "100"});
+    EXPECT_TRUE(pq.nrTransfer == NrTransfer::Pq);
+    EXPECT_EQ(pq.nrPipeBits, 16);
+    EXPECT_NEAR(pq.nrSdrWhite, 100.0, 1e-6);
+    EXPECT_TRUE(ParseCli({"--nr-video", "--nr-transfer", "hlg"}).nrTransfer == NrTransfer::Hlg);
+    EXPECT_TRUE(ParseCli({"--nr-video", "--nr-transfer", "hdr10"}).nrTransfer == NrTransfer::Pq);
+    EXPECT_EQ(ParseCli({"--nr-video", "--nr-pipe-bits", "16"}).nrPipeBits, 16);
+    // Contradictions are refused rather than silently resolved.
+    EXPECT_THROWS(ParseCli({"--nr-video", "--nr-transfer", "pq", "--nr-pipe-bits", "8"}));
+    EXPECT_THROWS(ParseCli({"--nr-video", "--nr-transfer", "gamma22"}));
+    EXPECT_THROWS(ParseCli({"--nr-video", "--nr-pipe-bits", "12"}));
+    EXPECT_THROWS(ParseCli({"--nr-video", "--nr-sdr-white", "0"}));
+    NrTransfer t = NrTransfer::Srgb;
+    EXPECT_FALSE(ParseNrTransfer("", &t));
+    EXPECT_TRUE(ParseNrTransfer("smpte2084", &t) && t == NrTransfer::Pq);
+    EXPECT_EQ(std::string(NrTransferName(NrTransfer::Hlg)), std::string("hlg"));
+}
+
 static void Test_Halton() {
     // Van der Corput base 2: 1/2, 1/4, 3/4, 1/8, 5/8 ...
     EXPECT_NEAR(Halton(1, 2), 0.5, 1e-12);
@@ -389,6 +451,48 @@ static void Test_ParseArgsValues() {
     EXPECT_TRUE(help);
     // --help must short-circuit before the "--in is required" check.
     EXPECT_NO_THROW(ParseCli({"-h"}));
+}
+
+static void Test_ParseArgsNrPrime() {
+    EXPECT_TRUE(ParseCli({"--in", "a.png"}).nrPrime == NrPrimeMode::None);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-prime", "sr"}).nrPrime == NrPrimeMode::Sr);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-prime", "CORE"}).nrPrime == NrPrimeMode::Core);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-prime", "none"}).nrPrime == NrPrimeMode::None);
+    EXPECT_THROWS(ParseCli({"--in", "a.png", "--nr-prime", "yes"}));
+    EXPECT_FALSE(ParseCli({"--probe-nr"}).probeCore);
+    EXPECT_TRUE(ParseCli({"--probe-nr", "--probe-core"}).probeCore);
+    // Removed: the model never read this key.
+    EXPECT_THROWS(ParseCli({"--in", "a.png", "--nr-global-tone", "1"}));
+    NrPrimeMode m = NrPrimeMode::Sr;
+    EXPECT_FALSE(ParseNrPrimeMode("", &m));
+    EXPECT_TRUE(ParseNrPrimeMode("Sr", &m) && m == NrPrimeMode::Sr);
+    EXPECT_EQ(std::string(NrPrimeModeName(NrPrimeMode::Core)), std::string("core"));
+}
+
+static void Test_ArchSpoofFlag() {
+    EXPECT_TRUE(ParseCli({"--in", "a.png"}).nrArchSpoof);
+    EXPECT_FALSE(ParseCli({"--in", "a.png", "--nr-arch-spoof", "0"}).nrArchSpoof);
+    EXPECT_TRUE(ParseCli({"--in", "a.png", "--nr-arch-spoof", "1"}).nrArchSpoof);
+    EXPECT_EQ(std::string(NvArchName(0x172)), std::string("Ampere"));
+    EXPECT_EQ(std::string(NvArchName(0x194)), std::string("Ada"));
+    EXPECT_EQ(std::string(NvArchName(0x1B0)), std::string("Blackwell"));
+    EXPECT_EQ(std::string(NvArchName(0x1A0)), std::string("Blackwell"));
+    EXPECT_EQ(std::string(NvArchName(0x160)), std::string("Turing"));
+    EXPECT_EQ(std::string(NvArchName(0)), std::string("unknown"));
+}
+
+static void Test_DriverVersionString() {
+    // DXGI UMD quad 32.0.16.1664 is NVIDIA 616.64; 32.0.15.6094 is 560.94.
+    const uint64_t v61664 = (uint64_t(32) << 48) | (uint64_t(0) << 32) | (uint64_t(16) << 16) | 1664;
+    const uint64_t v56094 = (uint64_t(32) << 48) | (uint64_t(0) << 32) | (uint64_t(15) << 16) | 6094;
+    EXPECT_EQ(NvidiaDriverVersionString(v61664), std::string("616.64"));
+    EXPECT_EQ(NvidiaDriverVersionString(v56094), std::string("560.94"));
+    EXPECT_EQ(UmdVersionQuadString(v61664), std::string("32.0.16.1664"));
+    EXPECT_EQ(NvidiaDriverNumber(v61664), 61664u);
+    EXPECT_TRUE(NvidiaDriverNumber(v56094) < kMinNvidiaDriverForNr);
+    EXPECT_TRUE(NvidiaDriverNumber(v61664) >= kMinNvidiaDriverForNr);
+    EXPECT_TRUE(NvidiaDriverVersionString(0).empty());
+    EXPECT_TRUE(UmdVersionQuadString(0).empty());
 }
 
 static void Test_ParseArgsErrors() {
@@ -634,6 +738,129 @@ static void Test_DownsampleIdentity() {
         worstLerp = std::max(worstLerp, std::fabs(static_cast<double>(lerped[i] - src.px[i])));
     }
     EXPECT_TRUE(worstLerp < 1e-3);
+}
+
+// CPU mirror of the encode pass's HDR proxy: C / (1 + max channel), then sRGB.
+static void HdrProxySrgb(const float* c, float* out) {
+    const float r = std::max(c[0], 0.0f), g = std::max(c[1], 0.0f), b = std::max(c[2], 0.0f);
+    const float P = std::max(r, std::max(g, b));
+    out[0] = LinearToSrgb(r / (1.0f + P));
+    out[1] = LinearToSrgb(g / (1.0f + P));
+    out[2] = LinearToSrgb(b / (1.0f + P));
+}
+
+static void Test_HdrProxyEncode() {
+    // Light from black through SDR white (1.0) up to 40x SDR white. The proxy must stay in
+    // 0..1, keep the dark end untouched (unity gain) and put SDR white at sRGB(0.5).
+    const int n = 32;
+    const ImageF src = MakeImage(n, n, [&](int x, int y, float* p) {
+        const float k = static_cast<float>(x) / (n - 1);
+        p[0] = 40.0f * k * k;
+        p[1] = 40.0f * k * k * (0.25f + 0.75f * y / (n - 1.0f));
+        p[2] = 40.0f * k * k * 0.5f;
+        p[3] = 1.0f;
+    });
+    GpuTexture srcTex = MakeSourceTexture(src);
+    GpuTexture dst = g_fix.gpu.CreateTexture(n, n, DXGI_FORMAT_R16G16B16A16_FLOAT, true, L"proxy");
+    g_fix.gpu.Begin();
+    g_fix.gpu.Transition(srcTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    g_fix.gpu.Transition(dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    g_fix.gpu.RecordEncode(srcTex, dst, EncodeMode::HdrProxySrgb);
+    g_fix.gpu.EndAndWait();
+    const std::vector<float> got = g_fix.gpu.ReadbackRgbaFloat(dst);
+
+    double worst = 0.0;
+    for (size_t i = 0; i < src.pixels(); ++i) {
+        float want[3];
+        HdrProxySrgb(&src.px[i * 4], want);
+        for (int c = 0; c < 3; ++c) {
+            EXPECT_TRUE(got[i * 4 + c] >= 0.0f && got[i * 4 + c] <= 1.0f);
+            worst = std::max(worst, std::fabs(static_cast<double>(got[i * 4 + c] - want[c])));
+        }
+    }
+    EXPECT_TRUE(worst < 2e-3);  // fp16 storage of an sRGB value
+
+    // A pixel at SDR white maps to sRGB(0.5); the darkest non-zero column is essentially unchanged.
+    const ImageF white = MakeImage(1, 1, [](int, int, float* p) { p[0] = p[1] = p[2] = 1.0f; p[3] = 1.0f; });
+    float w[3];
+    HdrProxySrgb(white.px.data(), w);
+    EXPECT_NEAR(w[0], LinearToSrgb(0.5f), 1e-6);
+    const float dim[4] = {0.01f, 0.01f, 0.01f, 1.0f};
+    float d[3];
+    HdrProxySrgb(dim, d);
+    EXPECT_NEAR(SrgbToLinear(d[0]), 0.01f / 1.01f, 1e-6);
+}
+
+static void Test_HdrCompositeResidual() {
+    // The contract the HDR path rests on: hand the composite the untouched proxy as the model's
+    // "output" and the PQ frame it writes must decode back to the original light, highlights
+    // included. Then push the proxy by a known amount and check the residual lands scaled by
+    // (1 + P), clamped at 0.25 proxy units.
+    const int n = 16;
+    const float whiteNits = 203.0f;
+    const ImageF src = MakeImage(n, n, [&](int x, int y, float* p) {
+        const float k = static_cast<float>(x) / (n - 1);
+        p[0] = 30.0f * k * k;                          // up to ~6000 nits
+        p[1] = 30.0f * k * k * (0.3f + 0.7f * y / (n - 1.0f));
+        p[2] = 30.0f * k * k * 0.6f;
+        p[3] = 1.0f;
+    });
+    ImageF proxy = src;
+    for (size_t i = 0; i < src.pixels(); ++i) HdrProxySrgb(&src.px[i * 4], &proxy.px[i * 4]);
+
+    GpuTexture orig = MakeSourceTexture(src);
+    GpuTexture nr = MakeSourceTexture(proxy);
+    GpuTexture dst = g_fix.gpu.CreateTexture(n, n, DXGI_FORMAT_R16G16B16A16_UNORM, true, L"pqOut");
+    auto composite = [&](GpuTexture& model) {
+        g_fix.gpu.Begin();
+        g_fix.gpu.Transition(orig, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        g_fix.gpu.Transition(model, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        g_fix.gpu.Transition(dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        g_fix.gpu.RecordComposite(orig, model, dst, 1.0f, 1.0f, CompositeMode::HdrPq,
+                                  whiteNits / 10000.0f, 10000.0f / whiteNits);
+        g_fix.gpu.EndAndWait();
+        return g_fix.gpu.ReadbackRgba16(dst);
+    };
+
+    // Identity: unchanged proxy -> unchanged light (within fp16 + 16-bit PQ quantisation).
+    const std::vector<uint8_t> same = composite(nr);
+    const uint16_t* s16 = reinterpret_cast<const uint16_t*>(same.data());
+    double worstRel = 0.0;
+    for (size_t i = 0; i < src.pixels(); ++i) {
+        for (int c = 0; c < 3; ++c) {
+            const float nits = PqEotfNits(s16[i * 4 + c] / 65535.0f);
+            const float want = src.px[i * 4 + c] * whiteNits;
+            if (want > 1.0f) worstRel = std::max(worstRel, static_cast<double>(std::fabs(nits - want) / want));
+            else EXPECT_TRUE(nits < 1.5f);
+        }
+        EXPECT_EQ(static_cast<unsigned>(s16[i * 4 + 3]), 65535u);
+    }
+    EXPECT_TRUE(worstRel < 0.02);
+
+    // A brighter proxy: +0.1 in proxy-linear on every channel -> +0.1 * (1 + P) SDR-white units.
+    ImageF pushed = proxy;
+    for (size_t i = 0; i < src.pixels(); ++i)
+        for (int c = 0; c < 3; ++c) {
+            const float lin = SrgbToLinear(proxy.px[i * 4 + c]) + 0.1f;
+            pushed.px[i * 4 + c] = LinearToSrgb(std::min(lin, 1.0f));
+        }
+    GpuTexture nr2 = MakeSourceTexture(pushed);
+    const std::vector<uint8_t> up = composite(nr2);
+    const uint16_t* u16 = reinterpret_cast<const uint16_t*>(up.data());
+    double worstAbs = 0.0;
+    for (size_t i = 0; i < src.pixels(); ++i) {
+        const float* c = &src.px[i * 4];
+        const float P = std::max(0.0f, std::max(c[0], std::max(c[1], c[2])));
+        for (int ch = 0; ch < 3; ++ch) {
+            const float pushedLin = std::min(c[ch] / (1.0f + P) + 0.1f, 1.0f);
+            const float delta = std::min(std::max(pushedLin - c[ch] / (1.0f + P), -0.25f), 0.25f);
+            const float want = std::min(c[ch] + (1.0f + P) * delta, 10000.0f / whiteNits);
+            const float got = PqEotfNits(u16[i * 4 + ch] / 65535.0f) / whiteNits;
+            worstAbs = std::max(worstAbs, std::fabs(static_cast<double>(got - want)) /
+                                              std::max(1.0, static_cast<double>(want)));
+        }
+    }
+    EXPECT_TRUE(worstAbs < 0.03);
 }
 
 static void Test_DownsampleScaleAndJitter() {
@@ -905,6 +1132,8 @@ int main(int argc, char** argv) {
 
     const std::vector<TestCase> tests = {
         {"SrgbRoundTrip", Test_SrgbRoundTrip, false},
+        {"PqTransfer", Test_PqTransfer, false},
+        {"HlgTransfer", Test_HlgTransfer, false},
         {"Halton", Test_Halton, false},
         {"JitterPhaseCount", Test_JitterPhaseCount, false},
         {"ParseJitterSign", Test_ParseJitterSign, false},
@@ -915,6 +1144,10 @@ int main(int argc, char** argv) {
         {"ParseArgsDefaults", Test_ParseArgsDefaults, false},
         {"ParseArgsValues", Test_ParseArgsValues, false},
         {"ParseArgsErrors", Test_ParseArgsErrors, false},
+        {"ParseArgsNrPrime", Test_ParseArgsNrPrime, false},
+        {"ParseArgsNrTransfer", Test_ParseArgsNrTransfer, false},
+        {"DriverVersionString", Test_DriverVersionString, false},
+        {"ArchSpoofFlag", Test_ArchSpoofFlag, false},
         {"MetricsIdentity", Test_MetricsIdentity, false},
         {"MetricsKnownError", Test_MetricsKnownError, false},
         {"MetricsSizeMismatch", Test_MetricsSizeMismatch, false},
@@ -927,6 +1160,8 @@ int main(int argc, char** argv) {
         {"HalfRoundTrip", Test_HalfRoundTrip, true},
         {"DownsampleIdentity", Test_DownsampleIdentity, true},
         {"DownsampleScaleAndJitter", Test_DownsampleScaleAndJitter, true},
+        {"HdrProxyEncode", Test_HdrProxyEncode, true},
+        {"HdrCompositeResidual", Test_HdrCompositeResidual, true},
         {"DownsampleSrgbEncode", Test_DownsampleSrgbEncode, true},
         {"DownsampleDepthAndMotion", Test_DownsampleDepthAndMotion, true},
         {"DlssAvailable", Test_DlssAvailable, true},
